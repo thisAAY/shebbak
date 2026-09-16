@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use openh264::decoder::Decoder;
 use openh264::encoder::Encoder;
 use openh264::formats::YUVSource;
@@ -36,6 +36,14 @@ impl H264Encoder {
 
     /// Encode one BGRA frame to an Annex-B access unit.
     pub fn encode_bgra(&mut self, frame: &BgraFrame) -> Result<Option<Vec<u8>>> {
+        // bgra_to_i420 asserts even dimensions; validate here so odd-sized
+        // frames (e.g. from window capture) surface as an error, not a panic.
+        ensure!(
+            frame.width % 2 == 0 && frame.height % 2 == 0,
+            "encode_bgra requires even dimensions, got {}x{}",
+            frame.width,
+            frame.height
+        );
         let i420 = bgra_to_i420(frame);
         let bitstream = self.inner.encode(&I420Source(&i420)).context("encode frame")?;
         let bytes = bitstream.to_vec();
@@ -121,5 +129,13 @@ mod tests {
         assert!((bs / n - 20).abs() <= 12, "b avg {}", bs / n);
         assert!((gs / n - 180).abs() <= 12, "g avg {}", gs / n);
         assert!((rs / n - 240).abs() <= 12, "r avg {}", rs / n);
+    }
+
+    #[test]
+    fn encode_bgra_rejects_odd_dimensions_instead_of_panicking() {
+        let mut enc = H264Encoder::new().unwrap();
+        let frame = solid(63, 64, 10, 20, 30);
+        let result = enc.encode_bgra(&frame);
+        assert!(result.is_err(), "expected Err for odd-width frame, got {:?}", result.is_ok());
     }
 }
