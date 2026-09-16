@@ -175,6 +175,8 @@ impl ClientPeer {
         Ok(())
     }
 
+    /// Must be called BEFORE `offer()`: webrtc-rs stores a single handler read at dispatch time,
+    /// and a track arriving before registration is silently lost.
     pub fn on_track(&self, f: impl Fn(String, Arc<TrackRemote>) + Send + Sync + 'static) {
         let f = Arc::new(f);
         self.pc.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver, _transceiver| {

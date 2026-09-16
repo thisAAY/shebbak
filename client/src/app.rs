@@ -125,7 +125,8 @@ impl App {
     fn create_mirror(&mut self, event_loop: &ActiveEventLoop, ann: OpenedWindow) {
         let attrs = Window::default_attributes()
             .with_title(ann.info.title.clone())
-            .with_inner_size(LogicalSize::new(ann.info.width, ann.info.height));
+            .with_inner_size(LogicalSize::new(ann.info.width, ann.info.height))
+            .with_resizable(false);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
