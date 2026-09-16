@@ -57,13 +57,30 @@ async fn main() -> Result<()> {
             eprintln!("session ended: {e:#}");
         }
         println!("waiting for next client...");
+        // A fast-failing session (e.g. a junk POST that makes serve_one_offer
+        // return Err) would otherwise spin the loop at full CPU and can fail
+        // to rebind port 9009 (EADDRINUSE) on back-to-back attempts.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
 fn main_display_scale() -> f64 {
     use core_graphics::display::CGDisplay;
-    let d = CGDisplay::main();
-    let pixels = d.pixels_wide() as f64;
-    let points = d.bounds().size.width;
-    if points > 0.0 { (pixels / points).round().max(1.0) } else { 2.0 }
+    // `CGDisplayPixelsWide`/`pixels_wide()` already returns *points* on Retina
+    // displays (it tracks the logical resolution, not the backing pixel
+    // count), so pairing it with `bounds().size.width` (also points) always
+    // yields a ratio of 1. The actual pixels-per-point scale only shows up by
+    // comparing the display mode's pixel dimensions against its point
+    // dimensions.
+    match CGDisplay::main().display_mode() {
+        Some(mode) => {
+            let points = mode.width() as f64;
+            if points > 0.0 {
+                (mode.pixel_width() as f64 / points).round().max(1.0)
+            } else {
+                2.0
+            }
+        }
+        None => 2.0,
+    }
 }
