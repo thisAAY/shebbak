@@ -90,7 +90,8 @@ async fn read_track(
     ui: Sender<UiEvent>,
     wake: impl Fn() + Send + Sync + 'static,
 ) {
-    let mut builder = SampleBuilder::new(64, H264Packet::default(), 90000);
+    let mut builder = SampleBuilder::new(512, H264Packet::default(), 90000)
+        .with_max_time_delay(std::time::Duration::from_millis(500));
     let mut decoder = match H264Decoder::new() {
         Ok(d) => d,
         Err(e) => {
