@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "transport", "capture", "input", "host"]
+members = ["core", "transport", "capture", "input", "host", "client"]
 
 [workspace.package]
 edition = "2021"
