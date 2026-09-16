@@ -1,0 +1,16 @@
+[package]
+name = "srw-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+srw-core = { path = "../core" }
+srw-transport = { path = "../transport" }
+srw-capture = { path = "../capture" }
+srw-input = { path = "../input" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+webrtc = "0.11"
+core-graphics = "0.24"
