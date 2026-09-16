@@ -153,7 +153,24 @@ impl App {
     fn destroy_mirror_by_remote(&mut self, remote: WindowId) {
         if let Some(wid) = self.by_remote.remove(&remote) {
             self.mirrors.remove(&wid);
-            self.by_track.retain(|_, v| *v != wid);
+            // Collect the track ids bound to this mirror before dropping them
+            // from `by_track` (retain alone would discard the keys), so any
+            // late frames still landing in `early_frames` for this track can
+            // be evicted too — otherwise a closed track's `read_track` task
+            // keeps decoding until the host tears it down, and every frame
+            // that misses the (now gone) `by_track` entry re-buffers itself
+            // into `early_frames` forever (one leaked frame per closed
+            // window for the rest of the process lifetime).
+            let track_ids: Vec<String> = self
+                .by_track
+                .iter()
+                .filter(|(_, v)| **v == wid)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for track_id in track_ids {
+                self.by_track.remove(&track_id);
+                self.early_frames.remove(&track_id);
+            }
         }
         if self.mirrors.is_empty() {
             eprintln!("all mirrors closed");
