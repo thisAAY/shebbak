@@ -60,19 +60,99 @@ async fn send_json<T: serde::Serialize>(
     Ok(())
 }
 
+/// The ordered (media type, mid) pairs across an SDP's media sections, used to
+/// tell whether an answer structurally corresponds to a particular offer.
+fn media_section_mids(desc: &RTCSessionDescription) -> Result<Vec<(String, Option<String>)>> {
+    let parsed = desc.unmarshal().context("unmarshal SDP for renegotiation validation")?;
+    Ok(parsed
+        .media_descriptions
+        .iter()
+        .map(|m| {
+            let mid = m.attribute(webrtc::sdp::description::session::ATTR_KEY_MID).flatten().map(str::to_owned);
+            (m.media_name.media.clone(), mid)
+        })
+        .collect())
+}
+
+/// Guards `renegotiate_inner` against applying an answer that doesn't
+/// correspond to the offer it just sent (see `PendingAnswerQueue`'s doc for
+/// why that can happen even with the queue's cleanup). Compares the ordered
+/// (media type, mid) set of each side's media sections: a mismatch means the
+/// answer was negotiated against different tracks than this offer describes,
+/// so it cannot be the right answer. A structurally identical answer is
+/// benign to apply even if it happens to be a stale one, since it carries the
+/// same track/media layout this call itself just offered.
+fn validate_answer_matches_offer(
+    offer: &RTCSessionDescription,
+    answer: &RTCSessionDescription,
+) -> Result<()> {
+    let offer_mids = media_section_mids(offer)?;
+    let answer_mids = media_section_mids(answer)?;
+    if offer_mids != answer_mids {
+        return Err(anyhow!(
+            "SdpAnswer media sections {answer_mids:?} do not match the current offer {offer_mids:?} \
+             (stale answer for an abandoned renegotiation?)"
+        ));
+    }
+    Ok(())
+}
+
+/// Holds at most one renegotiation's worth of "waiting for the client's
+/// SdpAnswer" state at a time (`renegotiation_lock` in `HostPeer` guarantees
+/// only one `renegotiate()` call runs at once). It's a queue rather than a
+/// bare `Option` purely so a timed-out/failed call can be told apart from a
+/// fresh one when cleaning up: `push` hands back a generation id, and
+/// `discard` removes exactly that entry if it's still sitting there unclaimed.
+///
+/// This does NOT, by itself, guarantee an incoming answer belongs to the
+/// renegotiation currently awaiting it — the generation id never goes on the
+/// wire, so a late answer for an abandoned renegotiation can still be popped
+/// into a newer one's receiver if `discard` didn't run before it arrived. The
+/// actual safety net against that mispairing is content validation in
+/// `HostPeer::renegotiate_inner` (comparing the answer's m-section/mid set
+/// against the offer this call just sent) before ever calling
+/// `set_remote_description`; `discard`-on-failure here just keeps the queue
+/// from accumulating dead entries that would otherwise block a later, correct
+/// answer from ever being popped.
+#[derive(Default)]
+struct PendingAnswerQueue {
+    next_generation: AtomicU64,
+    queue: Mutex<VecDeque<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)>>,
+}
+
+impl PendingAnswerQueue {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a fresh receiver for the next renegotiation answer, returning
+    /// its generation id (passed to `discard` if that renegotiation fails).
+    fn push(&self, tx: tokio::sync::oneshot::Sender<RTCSessionDescription>) -> u64 {
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.queue.lock().unwrap().push_back((generation, tx));
+        generation
+    }
+
+    /// Removes this generation's entry if it's still queued (no answer
+    /// arrived for it yet).
+    fn discard(&self, generation: u64) {
+        self.queue.lock().unwrap().retain(|(g, _)| *g != generation);
+    }
+
+    /// Pops the oldest still-pending entry. Used by both the production
+    /// SdpAnswer dispatch arm and by tests, so the exact code path that ships
+    /// is what gets exercised.
+    fn pop(&self) -> Option<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)> {
+        self.queue.lock().unwrap().pop_front()
+    }
+}
+
 pub struct HostPeer {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     on_msg: Arc<Mutex<Option<Arc<dyn Fn(ClientMessage) + Send + Sync>>>>,
     senders: Arc<Mutex<HashMap<String, Arc<RTCRtpSender>>>>,
-    // FIFO queue, not a single slot: the control channel is ordered and the
-    // client answers exactly once per offer it receives, in receipt order, so
-    // the Nth SdpAnswer ever received always corresponds to the Nth SdpOffer
-    // ever sent. A single `Option` slot would let a late answer for a timed-out
-    // renegotiation get delivered into a *later* renegotiation's receiver
-    // (see `renegotiate`'s cleanup-on-every-exit-path and the FIFO tests below).
-    pending_answers: Arc<Mutex<VecDeque<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)>>>,
-    generation: Arc<AtomicU64>,
+    pending_answers: Arc<PendingAnswerQueue>,
     renegotiation_lock: Arc<tokio::sync::Mutex<()>>,
     on_pli: Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>,
 }
@@ -83,9 +163,7 @@ impl HostPeer {
         let dc: Arc<Mutex<Option<Arc<RTCDataChannel>>>> = Arc::new(Mutex::new(None));
         let on_msg: Arc<Mutex<Option<Arc<dyn Fn(ClientMessage) + Send + Sync>>>> =
             Arc::new(Mutex::new(None));
-        let pending_answers: Arc<
-            Mutex<VecDeque<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)>>,
-        > = Arc::new(Mutex::new(VecDeque::new()));
+        let pending_answers = Arc::new(PendingAnswerQueue::new());
 
         let dc_slot = dc.clone();
         let on_msg_slot = on_msg.clone();
@@ -103,11 +181,7 @@ impl HostPeer {
                         Ok(ClientMessage::SdpAnswer { sdp }) => {
                             match serde_json::from_str::<RTCSessionDescription>(&sdp) {
                                 Ok(answer) => {
-                                    // Oldest still-pending renegotiation first: see the
-                                    // FIFO-ordering note on `pending_answers` above.
-                                    if let Some((_generation, tx)) =
-                                        pending_answers_slot.lock().unwrap().pop_front()
-                                    {
+                                    if let Some((_generation, tx)) = pending_answers_slot.pop() {
                                         let _ = tx.send(answer);
                                     } else {
                                         warn!("SdpAnswer received with no pending renegotiation");
@@ -137,41 +211,9 @@ impl HostPeer {
             on_msg,
             senders: Arc::new(Mutex::new(HashMap::new())),
             pending_answers,
-            generation: Arc::new(AtomicU64::new(0)),
             renegotiation_lock: Arc::new(tokio::sync::Mutex::new(())),
             on_pli: Arc::new(Mutex::new(None)),
         })
-    }
-
-    /// Registers a fresh oneshot receiver for the next renegotiation answer and
-    /// returns its generation id, used to find-and-remove this exact entry if
-    /// the renegotiation fails or times out (see `discard_pending_answer`).
-    fn push_pending_answer(
-        &self,
-        tx: tokio::sync::oneshot::Sender<RTCSessionDescription>,
-    ) -> u64 {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.pending_answers.lock().unwrap().push_back((generation, tx));
-        generation
-    }
-
-    /// Removes this generation's entry if it is still queued (i.e. no answer
-    /// arrived for it yet). Called on every failure/timeout exit of
-    /// `renegotiate()` so a dead sender never lingers in front of the queue
-    /// and swallows a later renegotiation's real answer.
-    fn discard_pending_answer(&self, generation: u64) {
-        self.pending_answers.lock().unwrap().retain(|(g, _)| *g != generation);
-    }
-
-    /// Pops the oldest still-pending renegotiation's entry — the same
-    /// operation the SdpAnswer dispatch arm performs on a real answer.
-    /// Exposed privately so the FIFO/cleanup invariant can be unit-tested
-    /// without going through actual SDP negotiation.
-    #[cfg(test)]
-    fn take_pending_answer(
-        &self,
-    ) -> Option<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)> {
-        self.pending_answers.lock().unwrap().pop_front()
     }
 
     /// Adds a sendonly H.264 track, keeps its RTCRtpSender, spawns an RTCP
@@ -218,15 +260,15 @@ impl HostPeer {
     pub async fn renegotiate(&self) -> Result<()> {
         let _guard = self.renegotiation_lock.lock().await; // one renegotiation at a time
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let generation = self.push_pending_answer(tx);
+        let generation = self.pending_answers.push(tx);
         let result = self.renegotiate_inner(rx).await;
         // Every exit path funnels through `result` above: on success, our
         // entry was already popped by the SdpAnswer dispatch (discard is then
-        // a harmless no-op); on any failure/timeout it's still queued and
-        // MUST be removed here so it can't later swallow a subsequent
-        // renegotiation's real answer.
+        // a harmless no-op); on any failure/timeout — including a rejected,
+        // mismatched answer — it may still be queued and MUST be removed here
+        // so a dead entry never blocks a later, correct answer from popping.
         if result.is_err() {
-            self.discard_pending_answer(generation);
+            self.pending_answers.discard(generation);
         }
         result
     }
@@ -247,6 +289,11 @@ impl HostPeer {
             .await
             .context("renegotiation answer timeout")?
             .map_err(|_| anyhow!("renegotiation answer channel dropped"))?;
+        // The wire format carries no correlation id (see `PendingAnswerQueue`
+        // doc), so a late answer for an abandoned renegotiation could still
+        // reach here. Reject it unless it structurally matches the offer this
+        // call just sent: a mismatch means it can't be the right answer.
+        validate_answer_matches_offer(&local, &answer)?;
         self.pc.set_remote_description(answer).await?;
         Ok(())
     }
@@ -416,68 +463,102 @@ mod tests {
             .unwrap()
     }
 
-    /// Reproduces the exact race from the review finding without any real SDP
-    /// negotiation or timing: a renegotiation times out (its entry is
-    /// discarded, as `renegotiate()` now does on every failure/timeout exit),
-    /// a second renegotiation starts fresh, and a late answer physically
-    /// arriving afterward must not be routed into the wrong generation.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn discarded_generation_is_not_delivered_to_next_renegotiation() {
-        let host = HostPeer::new().await.unwrap();
+    // --- PendingAnswerQueue: plain, runtime-free tests against the exact
+    // production push/discard/pop path (no HostPeer or RTCPeerConnection
+    // needed — `oneshot::Sender::send` and `channel()` don't require a
+    // runtime, only `.await`ing the receiver would).
+
+    #[test]
+    fn discarded_generation_is_not_delivered_to_next_renegotiation() {
+        let queue = PendingAnswerQueue::new();
 
         // Renegotiation 1: pushed, then times out. renegotiate() would call
-        // discard_pending_answer(gen1) on that path; simulate it directly.
+        // discard(gen1) on that path; simulate it directly.
         let (tx1, rx1) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
-        let gen1 = host.push_pending_answer(tx1);
-        host.discard_pending_answer(gen1);
+        let gen1 = queue.push(tx1);
+        queue.discard(gen1);
         drop(rx1); // the timed-out caller's receiver goes out of scope
 
         // Renegotiation 2 starts fresh (as it would after the lock is
         // released and reacquired).
-        let (tx2, rx2) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
-        let gen2 = host.push_pending_answer(tx2);
+        let (tx2, _rx2) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen2 = queue.push(tx2);
         assert_ne!(gen1, gen2);
 
         // A late SdpAnswer "arrives" now. The queue must contain only
         // generation 2's entry — generation 1's was already discarded.
-        let (next_gen, next_tx) = host.take_pending_answer().expect("generation 2 must still be queued");
+        let (next_gen, next_tx) = queue.pop().expect("generation 2 must still be queued");
         assert_eq!(next_gen, gen2, "a discarded generation must not resurface");
-        assert!(host.take_pending_answer().is_none(), "queue must be empty after taking the only entry");
+        assert!(queue.pop().is_none(), "queue must be empty after popping the only entry");
 
-        let answer = dummy_answer();
-        next_tx.send(answer.clone()).unwrap();
-        let got = rx2.await.unwrap();
-        assert_eq!(got.sdp, answer.sdp);
+        // Routing succeeded (receiver not dropped): send returns Ok.
+        assert!(next_tx.send(dummy_answer()).is_ok());
     }
 
     /// When two renegotiations are genuinely both still in flight (neither
     /// discarded), answers must be routed oldest-generation-first, matching
     /// the ordered data channel's delivery order.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn pending_answers_are_routed_fifo_by_generation() {
-        let host = HostPeer::new().await.unwrap();
+    #[test]
+    fn pending_answers_are_routed_fifo_by_generation() {
+        let queue = PendingAnswerQueue::new();
 
-        let (tx1, rx1) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
-        let gen1 = host.push_pending_answer(tx1);
-        let (tx2, rx2) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
-        let gen2 = host.push_pending_answer(tx2);
+        let (tx1, _rx1) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen1 = queue.push(tx1);
+        let (tx2, _rx2) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen2 = queue.push(tx2);
 
-        let (g, tx) = host.take_pending_answer().unwrap();
+        let (g, tx) = queue.pop().unwrap();
         assert_eq!(g, gen1);
-        tx.send(dummy_answer()).unwrap();
-        rx1.await.unwrap();
+        assert!(tx.send(dummy_answer()).is_ok());
 
-        let (g, tx) = host.take_pending_answer().unwrap();
+        let (g, tx) = queue.pop().unwrap();
         assert_eq!(g, gen2);
-        tx.send(dummy_answer()).unwrap();
-        rx2.await.unwrap();
+        assert!(tx.send(dummy_answer()).is_ok());
     }
 
     /// A stray SdpAnswer with nothing queued for it must not panic; the real
     /// dispatch arm just warns and drops it.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn taking_from_an_empty_queue_returns_none() {
-        let host = HostPeer::new().await.unwrap();
-        assert!(host.take_pending_answer().is_none());
+    #[test]
+    fn popping_an_empty_queue_returns_none() {
+        let queue = PendingAnswerQueue::new();
+        assert!(queue.pop().is_none());
+    }
+
+    // --- Answer/offer content validation ---
+
+    fn sdp_with_mids(kind: &str, mids: &[&str]) -> RTCSessionDescription {
+        let mut sdp = String::from("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n");
+        for mid in mids {
+            sdp.push_str(&format!("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:{mid}\r\n"));
+        }
+        match kind {
+            "offer" => RTCSessionDescription::offer(sdp).unwrap(),
+            "answer" => RTCSessionDescription::answer(sdp).unwrap(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn matching_answer_passes_validation() {
+        let offer = sdp_with_mids("offer", &["0", "1"]);
+        let answer = sdp_with_mids("answer", &["0", "1"]);
+        assert!(validate_answer_matches_offer(&offer, &answer).is_ok());
+    }
+
+    /// The scenario this guards against: a stale answer for an earlier,
+    /// differently-tracked offer arrives after a newer renegotiation's offer
+    /// (e.g. one fewer track) has already been sent.
+    #[test]
+    fn structurally_mismatched_answer_is_rejected() {
+        let offer = sdp_with_mids("offer", &["0"]);
+        let stale_answer_for_a_bigger_offer = sdp_with_mids("answer", &["0", "1"]);
+        assert!(validate_answer_matches_offer(&offer, &stale_answer_for_a_bigger_offer).is_err());
+    }
+
+    #[test]
+    fn empty_offer_and_answer_are_considered_matching() {
+        let offer = sdp_with_mids("offer", &[]);
+        let answer = sdp_with_mids("answer", &[]);
+        assert!(validate_answer_matches_offer(&offer, &answer).is_ok());
     }
 }
