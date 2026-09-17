@@ -33,6 +33,26 @@ impl AppTracker {
     pub fn diff(&mut self, snapshot: Vec<SnapshotWindow>) -> Vec<TrackerEvent> {
         let ours: Vec<SnapshotWindow> =
             snapshot.into_iter().filter(|w| self.pids.contains(&w.pid)).collect();
+        // A Transient window that's off screen (e.g. a dismissed menu whose
+        // NSWindow lingers in CGWindowList after being ordered out) is
+        // treated as not present at all: filtered out here so it can never
+        // freshly Open, and dropped from `now_ids` below so an already-live
+        // one gets Closed like any other vanished window. Normal/Sheet
+        // windows are unaffected — a minimized Normal window is legitimately
+        // off screen and must stay tracked. For a window we haven't seen
+        // before there's no `Tracked` entry yet, so its kind is classified
+        // the same way the Opens loop below would.
+        let ours: Vec<SnapshotWindow> = ours
+            .into_iter()
+            .filter(|w| {
+                let kind = self
+                    .live
+                    .get(&w.info.id)
+                    .map(|t| t.kind)
+                    .unwrap_or_else(|| classify(w.layer, w.ax_role));
+                kind != WindowKind::Transient || w.on_screen
+            })
+            .collect();
         let now_ids: HashSet<WindowId> = ours.iter().map(|w| w.info.id).collect();
         let mut events = Vec::new();
 
@@ -285,6 +305,41 @@ mod tests {
         let ev = t.diff(vec![menu_renamed, normal(1, 100)]);
         assert!(ev.contains(&TrackerEvent::TitleChanged { window_id: 2, title: "menu renamed".into() }),
                 "TitleChanged must fire for transients, got {:?}", ev);
+    }
+
+    #[test]
+    fn dismissed_transient_going_off_screen_closes() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let mut menu = snap(2, 100, 101, AxRole::Unknown, 40.0, 60.0, 200.0, 300.0, "", false);
+        t.diff(vec![menu.clone(), normal(1, 100)]); // menu opens on screen
+        // Menu dismissed: NSWindow lingers in CGWindowList but ordered out.
+        menu.on_screen = false;
+        let ev = t.diff(vec![menu, normal(1, 100)]);
+        assert_eq!(ev, vec![TrackerEvent::Closed { window_id: 2 }]);
+    }
+
+    #[test]
+    fn new_transient_already_off_screen_does_not_open() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let mut menu = snap(2, 100, 101, AxRole::Unknown, 40.0, 60.0, 200.0, 300.0, "", false);
+        menu.on_screen = false;
+        let ev = t.diff(vec![menu, normal(1, 100)]);
+        assert!(ev.is_empty(), "off-screen transient must never open, got {:?}", ev);
+        assert_eq!(t.kind_of(2), None);
+    }
+
+    #[test]
+    fn minimized_normal_window_off_screen_stays_tracked() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let mut min = normal(1, 100);
+        min.minimized = true;
+        min.on_screen = false;
+        let ev = t.diff(vec![min]);
+        assert_eq!(ev, vec![TrackerEvent::Minimized { window_id: 1 }]);
+        assert_eq!(t.kind_of(1), Some(WindowKind::Normal), "minimized normal window must stay tracked");
     }
 
     #[test]

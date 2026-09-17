@@ -21,8 +21,19 @@ pub enum UiEvent {
 }
 
 pub struct Net {
+    // Neither field is read directly anymore now that `send_client_msg` goes
+    // through `input_tx` — both are kept for RAII: `rt` must outlive every
+    // task spawned on it (dropping the runtime tears those down), and `peer`
+    // documents that the connection is scoped to `Net`'s lifetime.
+    #[allow(dead_code)]
     pub peer: Arc<ClientPeer>,
+    #[allow(dead_code)]
     pub rt: tokio::runtime::Runtime,
+    /// Ordered outbound queue for `send_client_msg` — a single task drains
+    /// this sequentially so two back-to-back sends (e.g. a mouse Down then
+    /// Up, or a KeyEvent then FocusChange) can never race each other onto
+    /// the data channel out of order.
+    input_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
 }
 
 /// Build the connection. `notify` delivers UiEvents plus a wake callback
@@ -53,6 +64,12 @@ pub fn connect(
                     wake();
                 }
                 return; // chunks never reach the app layer raw
+            }
+            if let HostMessage::WindowClosed { window_id } = m {
+                // Drop the assembler's state for this window before forwarding
+                // the close on, so a recycled CGWindowID's fresh seq=1 blits
+                // aren't rejected as stale forever (BlitAssembler::forget).
+                assembler.lock().unwrap().forget(window_id);
             }
             let _ = ui.send(UiEvent::Host(m));
             wake();
@@ -93,7 +110,22 @@ pub fn connect(
     rt.block_on(peer.accept_answer(answer))?;
     info!("connected");
 
-    Ok(Net { peer, rt })
+    // Single ordered sender task: all client input goes through this one
+    // channel and is awaited sequentially, so message order on the wire
+    // matches the order `send_client_msg` was called in.
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
+    {
+        let peer = peer.clone();
+        rt.spawn(async move {
+            while let Some(msg) = input_rx.recv().await {
+                if let Err(e) = peer.send(&msg).await {
+                    warn!("send failed: {e}");
+                }
+            }
+        });
+    }
+
+    Ok(Net { peer, rt, input_tx })
 }
 
 async fn read_track(
@@ -150,12 +182,8 @@ async fn read_track(
     }
 }
 
-/// Fire-and-forget send from the UI thread.
+/// Fire-and-forget send from the UI thread. Ordered relative to every other
+/// call to this function — see `Net::input_tx`.
 pub fn send_client_msg(net: &Net, msg: ClientMessage) {
-    let peer = net.peer.clone();
-    net.rt.spawn(async move {
-        if let Err(e) = peer.send(&msg).await {
-            warn!("send failed: {e}");
-        }
-    });
+    let _ = net.input_tx.send(msg);
 }

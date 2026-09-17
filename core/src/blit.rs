@@ -56,6 +56,16 @@ impl BlitAssembler {
             Some((*window_id, out))
         } else { None }
     }
+
+    /// Drop all state for `window_id` — call when the host reports the
+    /// window closed. Without this, `last_completed_seq` only ever grows,
+    /// so a recycled CGWindowID's fresh seq=1 blits are silently rejected
+    /// forever (stuck behind the dead window's high-water mark), and the
+    /// maps grow unbounded across menu churn.
+    pub fn forget(&mut self, window_id: WindowId) {
+        self.partials.remove(&window_id);
+        self.last_completed_seq.remove(&window_id);
+    }
 }
 
 impl Default for BlitAssembler { fn default() -> Self { Self::new() } }
@@ -103,6 +113,45 @@ mod tests {
     fn non_blit_messages_are_ignored() {
         let mut asm = BlitAssembler::new();
         assert_eq!(asm.push(&HostMessage::WindowClosed { window_id: 1 }), None);
+    }
+
+    #[test]
+    fn forget_lets_a_recycled_window_id_start_fresh() {
+        // Complete seq 5 at window 9 (simulates a long-lived window with many blits).
+        let payload = vec![9u8; 100];
+        let msgs = chunk_blit(9, 5, &payload);
+        let mut asm = BlitAssembler::new();
+        assert_eq!(asm.push(&msgs[0]), Some((9, payload)));
+
+        // Window 9's CGWindowID gets recycled for a brand-new window; without
+        // forget(), its fresh seq=1 blit would be rejected forever as stale.
+        asm.forget(9);
+        let fresh_payload = vec![1u8; 50];
+        let fresh = chunk_blit(9, 1, &fresh_payload);
+        assert_eq!(asm.push(&fresh[0]), Some((9, fresh_payload)), "seq 1 must assemble after forget");
+    }
+
+    #[test]
+    fn forget_does_not_affect_independent_windows() {
+        let payload9 = vec![9u8; 100];
+        let msgs9 = chunk_blit(9, 5, &payload9);
+        let mut asm = BlitAssembler::new();
+        assert_eq!(asm.push(&msgs9[0]), Some((9, payload9)));
+
+        // window 3 has an in-flight partial (2 of 3 chunks) when window 9 is forgotten.
+        let payload3: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let msgs3 = chunk_blit(3, 1, &payload3);
+        assert_eq!(msgs3.len(), 3);
+        assert_eq!(asm.push(&msgs3[0]), None);
+        assert_eq!(asm.push(&msgs3[1]), None);
+
+        asm.forget(9);
+
+        // window 3's in-flight partial and high-water mark are untouched.
+        assert_eq!(asm.push(&msgs3[2]), Some((3, payload3)));
+        // and window 9's own stale seq-5 duplicate is still rejected before forget... but
+        // after forget it's gone, so a stale seq-5 duplicate would now be treated as fresh.
+        // That's the intended tradeoff of forget(): the window identity is gone entirely.
     }
 
     #[test]

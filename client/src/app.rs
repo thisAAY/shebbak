@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
@@ -84,9 +84,6 @@ pub struct App {
     modifiers: ModifiersState,
     /// Frames that arrived before the mirror window existed, keyed by track_id.
     early_frames: HashMap<String, BgraFrame>,
-    /// Transient blits that arrived before their mirror window existed,
-    /// keyed by the remote window id (transients have no track_id).
-    early_blits: HashMap<WindowId, RgbaImage>,
     mirrors: HashMap<WinitWindowId, Mirror>,
     by_remote: HashMap<WindowId, WinitWindowId>,
     by_track: HashMap<String, WinitWindowId>,
@@ -104,7 +101,6 @@ impl App {
             binder: TrackBinder::new(),
             modifiers: ModifiersState::empty(),
             early_frames: HashMap::new(),
-            early_blits: HashMap::new(),
             mirrors: HashMap::new(),
             by_remote: HashMap::new(),
             by_track: HashMap::new(),
@@ -207,7 +203,14 @@ impl App {
                             }
                         }
                         None => {
-                            self.early_blits.insert(window_id, img);
+                            // The host sends WindowOpened before starting the
+                            // blit thread, and the data channel is ordered, so
+                            // a blit for a window we don't know about is not a
+                            // race — it's a straggler that arrived after
+                            // WindowClosed already evicted the mirror. Drop it
+                            // rather than buffering (buffering these leaked a
+                            // full decoded image per closed transient forever).
+                            debug!("dropping blit for unknown/closed window {window_id}");
                         }
                     },
                     Err(e) => warn!("blit decode failed for {window_id}: {e}"),
@@ -230,6 +233,13 @@ impl App {
     }
 
     fn create_mirror(&mut self, event_loop: &ActiveEventLoop, ann: OpenedWindow) {
+        if self.by_remote.contains_key(&ann.info.id) {
+            // A second WindowOpened for a live remote id would overwrite
+            // `by_remote` and strand the first Mirror unreachable (an
+            // undecorated always-on-top window nothing can ever destroy).
+            warn!("duplicate WindowOpened for live remote window {}; ignoring", ann.info.id);
+            return;
+        }
         let attrs = match ann.kind {
             WindowKind::Normal => Window::default_attributes()
                 .with_title(ann.info.title.clone())
@@ -276,14 +286,10 @@ impl App {
         let context = Context::new(window.clone()).expect("softbuffer context");
         let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
         let wid = window.id();
-        // Transients (no track) seed from early_blits; track-backed windows
-        // seed from early_frames. A window is never both.
-        let content = self
-            .early_blits
-            .remove(&ann.info.id)
-            .map(MirrorContent::Image)
-            .or_else(|| self.early_frames.remove(&ann.track_id).map(MirrorContent::Video))
-            .unwrap_or(MirrorContent::None);
+        // Track-backed windows may seed from a frame that arrived just before
+        // this mirror was created. Transients have no track and no analogous
+        // early-blit buffer — see the Blit arm in `drain` for why.
+        let content = self.early_frames.remove(&ann.track_id).map(MirrorContent::Video).unwrap_or(MirrorContent::None);
         let mirror = Mirror {
             window,
             surface,
@@ -308,7 +314,6 @@ impl App {
     }
 
     fn destroy_mirror_by_remote(&mut self, remote: WindowId) {
-        self.early_blits.remove(&remote);
         if let Some(wid) = self.by_remote.remove(&remote) {
             self.mirrors.remove(&wid);
             // Collect the track ids bound to this mirror before dropping them
