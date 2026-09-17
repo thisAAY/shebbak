@@ -12,6 +12,19 @@ pub struct WindowInfo {
     pub height: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxRole { Window, Sheet, Unknown }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotWindow {
+    pub info: WindowInfo,
+    pub pid: i32,
+    pub layer: i64,
+    pub on_screen: bool,
+    pub ax_role: AxRole,
+    pub minimized: bool,
+}
+
 /// Translate window-local points to host screen points.
 pub fn window_local_to_screen(win: &WindowInfo, local_x: f64, local_y: f64) -> (f64, f64) {
     (win.x + local_x, win.y + local_y)

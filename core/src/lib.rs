@@ -3,3 +3,4 @@ pub mod model;
 pub mod tracker;
 pub mod pixels;
 pub mod blit;
+pub mod classify;
