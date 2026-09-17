@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+use crate::blit;
 use crate::pipeline::Pipeline;
 
 const SIGNAL_PORT: u16 = 9009;
@@ -21,8 +22,8 @@ const RECONCILE_MS: u64 = 500;
 
 /// Per-window runtime state. `Track` windows (Normal/Sheet) get a media track
 /// + encoder pipeline + capture; `Transient` windows are announced but their
-/// pixels ride the control channel as blits (Task 15 fills in `stop`, the
-/// blit loop's shutdown flag — this task only ever inserts `None`).
+/// pixels ride the control channel as blits, driven by the loop `blit`
+/// started in the `Opened` arm (`stop` is that loop's shutdown flag).
 enum WindowRuntime {
     Track { pipeline: Arc<Pipeline>, capture: Option<Box<dyn WindowCapture>>, track_id: String },
     Blit { stop: Option<Arc<AtomicBool>> },
@@ -290,7 +291,7 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
 /// actually live, which the caller always tears down.
 #[allow(clippy::too_many_arguments)]
 async fn run_session_body(
-    peer: &HostPeer,
+    peer: &Arc<HostPeer>,
     scale: f64,
     tracker: &Arc<Mutex<AppTracker>>,
     source: &mut PidSnapshotSource,
@@ -345,11 +346,7 @@ async fn run_session_body(
                                 }
                             }
                         }
-                        WindowKind::Transient => {
-                            // Task 15 replaces this with the real blit-loop start.
-                            runtimes.insert(window.info.id, WindowRuntime::Blit { stop: None });
-                            None
-                        }
+                        WindowKind::Transient => None,
                     };
                     let msg = HostMessage::WindowOpened {
                         window_id: window.info.id,
@@ -364,6 +361,17 @@ async fn run_session_body(
                     };
                     if let Err(e) = peer.send(&msg).await {
                         warn!("send WindowOpened: {e}");
+                    }
+                    if kind == WindowKind::Transient {
+                        // Started AFTER WindowOpened: the client should know the
+                        // window exists before pixels arrive, though it buffers
+                        // early blits regardless (mirroring `early_frames`).
+                        runtimes.insert(
+                            window.info.id,
+                            WindowRuntime::Blit {
+                                stop: Some(blit::start_blit(window.info.id, peer.clone(), rt.clone())),
+                            },
+                        );
                     }
                 }
                 TrackerEvent::Closed { window_id } => {

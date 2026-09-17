@@ -1,3 +1,4 @@
+mod blit;
 mod pipeline;
 mod session;
 
