@@ -2822,6 +2822,7 @@ dependencies = [
 name = "srw-capture"
 version = "0.1.0"
 dependencies = [
+ "accessibility-sys",
  "anyhow",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",

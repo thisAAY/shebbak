@@ -12,3 +12,4 @@ tracing.workspace = true
 core-foundation = "0.10"
 core-graphics = "0.24"
 screencapturekit = "10"
+accessibility-sys = "0.1"

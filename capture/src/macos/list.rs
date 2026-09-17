@@ -1,6 +1,7 @@
 use anyhow::Result;
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
@@ -8,8 +9,9 @@ use core_graphics::window::{
     kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
     CGWindowListCopyWindowInfo,
 };
-use srw_core::model::WindowInfo;
+use srw_core::model::{AxRole, SnapshotWindow, WindowInfo};
 use srw_core::tracker::WindowSnapshotSource;
+use std::collections::HashSet;
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,12 @@ fn dict_string(dict: &CFDictionary<CFString, CFType>, key: &str) -> Option<Strin
     dict.find(CFString::new(key))
         .and_then(|v| v.downcast::<CFString>())
         .map(|s| s.to_string())
+}
+
+fn dict_bool(dict: &CFDictionary<CFString, CFType>, key: &str) -> Option<bool> {
+    dict.find(CFString::new(key))
+        .and_then(|v| v.downcast::<CFBoolean>())
+        .map(bool::from)
 }
 
 // `CFDictionary<CFString, CFType>` (unlike the void-pointer-keyed variant) isn't a
@@ -102,17 +110,111 @@ pub fn list_windows() -> Result<Vec<WindowListEntry>> {
     Ok(out)
 }
 
-/// Real snapshot source for the tracker.
-pub struct CgSnapshotSource;
+#[derive(Debug, Clone)]
+pub struct AppEntry {
+    pub pid: i32,
+    pub app_name: String,
+    pub window_titles: Vec<String>,
+}
 
-impl WindowSnapshotSource for CgSnapshotSource {
-    fn snapshot(&mut self) -> Vec<WindowInfo> {
-        match list_windows() {
-            Ok(entries) => entries.into_iter().map(|e| e.info).collect(),
+/// Apps that currently have at least one on-screen layer-0 window >=50pt, for the picker.
+pub fn list_apps() -> Result<Vec<AppEntry>> {
+    let entries = list_windows()?;
+    let mut apps: Vec<AppEntry> = Vec::new();
+    for e in entries {
+        match apps.iter_mut().find(|a| a.pid == e.pid) {
+            Some(app) => app.window_titles.push(e.info.title),
+            None => apps.push(AppEntry {
+                pid: e.pid,
+                app_name: e.app_name,
+                window_titles: vec![e.info.title],
+            }),
+        }
+    }
+    Ok(apps)
+}
+
+/// ALL windows of the given pids: no OnScreenOnly (minimized/off-Space included), all
+/// layers (menus/tooltips included), front-to-back order. `ax_role`/`minimized` are
+/// filled in by the caller via `ax_meta`; here they're Unknown/false.
+pub fn snapshot_windows(pids: &HashSet<i32>) -> Result<Vec<SnapshotWindow>> {
+    let raw = unsafe {
+        CGWindowListCopyWindowInfo(kCGWindowListExcludeDesktopElements, kCGNullWindowID)
+    };
+    if raw.is_null() {
+        anyhow::bail!("CGWindowListCopyWindowInfo returned null (no WindowServer session?)");
+    }
+    let array: CFArray<CFDictionary<CFString, CFType>> =
+        unsafe { CFArray::wrap_under_create_rule(raw) };
+
+    let mut out = Vec::new();
+    for dict in array.iter() {
+        let pid = dict_i64(&dict, "kCGWindowOwnerPID").unwrap_or(0) as i32;
+        if !pids.contains(&pid) {
+            continue;
+        }
+        let id = match dict_i64(&dict, "kCGWindowNumber") {
+            Some(n) => n as u32,
+            None => continue,
+        };
+        let layer = dict_i64(&dict, "kCGWindowLayer").unwrap_or(0);
+        let on_screen = dict_bool(&dict, "kCGWindowIsOnscreen").unwrap_or(false);
+        let alpha = dict_f64(&dict, "kCGWindowAlpha").unwrap_or(1.0);
+        if alpha == 0.0 {
+            continue; // fully transparent helper windows
+        }
+        let title = dict_string(&dict, "kCGWindowName").unwrap_or_default();
+        let bounds = match dict_dict(&dict, "kCGWindowBounds") {
+            Some(b) => b,
+            None => continue,
+        };
+        let (x, y, w, h) = match (
+            dict_f64(&bounds, "X"),
+            dict_f64(&bounds, "Y"),
+            dict_f64(&bounds, "Width"),
+            dict_f64(&bounds, "Height"),
+        ) {
+            (Some(x), Some(y), Some(w), Some(h)) => (x, y, w, h),
+            _ => continue,
+        };
+        if w < 8.0 || h < 8.0 {
+            continue; // 1-px artifacts, not tooltips
+        }
+        out.push(SnapshotWindow {
+            info: WindowInfo { id, title, x, y, width: w, height: h },
+            pid,
+            layer,
+            on_screen,
+            ax_role: AxRole::Unknown,
+            minimized: false,
+        });
+    }
+    Ok(out)
+}
+
+/// Real snapshot source for the tracker: CGWindowList geometry merged with AX role
+/// and minimized state, scoped to the pid(s) being shared.
+pub struct PidSnapshotSource {
+    pub pids: HashSet<i32>,
+}
+
+impl WindowSnapshotSource for PidSnapshotSource {
+    fn snapshot(&mut self) -> Vec<SnapshotWindow> {
+        let mut wins = match snapshot_windows(&self.pids) {
+            Ok(w) => w,
             Err(e) => {
                 warn!("window snapshot failed: {e}");
-                Vec::new()
+                return Vec::new();
+            }
+        };
+        let pids: Vec<i32> = self.pids.iter().copied().collect();
+        let meta = crate::macos::ax_meta::query_ax_meta(&pids);
+        for w in &mut wins {
+            if let Some(m) = meta.get(&w.info.id) {
+                w.ax_role = m.role;
+                w.minimized = m.minimized;
             }
         }
+        wins
     }
 }
