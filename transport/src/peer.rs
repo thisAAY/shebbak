@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use srw_core::protocol::{ClientMessage, HostMessage};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -64,7 +65,14 @@ pub struct HostPeer {
     dc: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     on_msg: Arc<Mutex<Option<Arc<dyn Fn(ClientMessage) + Send + Sync>>>>,
     senders: Arc<Mutex<HashMap<String, Arc<RTCRtpSender>>>>,
-    pending_answer: Arc<Mutex<Option<tokio::sync::oneshot::Sender<RTCSessionDescription>>>>,
+    // FIFO queue, not a single slot: the control channel is ordered and the
+    // client answers exactly once per offer it receives, in receipt order, so
+    // the Nth SdpAnswer ever received always corresponds to the Nth SdpOffer
+    // ever sent. A single `Option` slot would let a late answer for a timed-out
+    // renegotiation get delivered into a *later* renegotiation's receiver
+    // (see `renegotiate`'s cleanup-on-every-exit-path and the FIFO tests below).
+    pending_answers: Arc<Mutex<VecDeque<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)>>>,
+    generation: Arc<AtomicU64>,
     renegotiation_lock: Arc<tokio::sync::Mutex<()>>,
     on_pli: Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>,
 }
@@ -75,27 +83,34 @@ impl HostPeer {
         let dc: Arc<Mutex<Option<Arc<RTCDataChannel>>>> = Arc::new(Mutex::new(None));
         let on_msg: Arc<Mutex<Option<Arc<dyn Fn(ClientMessage) + Send + Sync>>>> =
             Arc::new(Mutex::new(None));
-        let pending_answer: Arc<Mutex<Option<tokio::sync::oneshot::Sender<RTCSessionDescription>>>> =
-            Arc::new(Mutex::new(None));
+        let pending_answers: Arc<
+            Mutex<VecDeque<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)>>,
+        > = Arc::new(Mutex::new(VecDeque::new()));
 
         let dc_slot = dc.clone();
         let on_msg_slot = on_msg.clone();
-        let pending_answer_slot = pending_answer.clone();
+        let pending_answers_slot = pending_answers.clone();
         pc.on_data_channel(Box::new(move |ch: Arc<RTCDataChannel>| {
             let dc_slot = dc_slot.clone();
             let on_msg_slot = on_msg_slot.clone();
-            let pending_answer_slot = pending_answer_slot.clone();
+            let pending_answers_slot = pending_answers_slot.clone();
             Box::pin(async move {
                 let handler_slot = on_msg_slot.clone();
-                let pending_answer_slot = pending_answer_slot.clone();
+                let pending_answers_slot = pending_answers_slot.clone();
                 ch.on_message(Box::new(move |m: DataChannelMessage| {
                     let handler = handler_slot.lock().unwrap().clone();
                     match serde_json::from_slice::<ClientMessage>(&m.data) {
                         Ok(ClientMessage::SdpAnswer { sdp }) => {
                             match serde_json::from_str::<RTCSessionDescription>(&sdp) {
                                 Ok(answer) => {
-                                    if let Some(tx) = pending_answer_slot.lock().unwrap().take() {
+                                    // Oldest still-pending renegotiation first: see the
+                                    // FIFO-ordering note on `pending_answers` above.
+                                    if let Some((_generation, tx)) =
+                                        pending_answers_slot.lock().unwrap().pop_front()
+                                    {
                                         let _ = tx.send(answer);
+                                    } else {
+                                        warn!("SdpAnswer received with no pending renegotiation");
                                     }
                                 }
                                 Err(e) => warn!("bad SdpAnswer payload: {e}"),
@@ -121,10 +136,42 @@ impl HostPeer {
             dc,
             on_msg,
             senders: Arc::new(Mutex::new(HashMap::new())),
-            pending_answer,
+            pending_answers,
+            generation: Arc::new(AtomicU64::new(0)),
             renegotiation_lock: Arc::new(tokio::sync::Mutex::new(())),
             on_pli: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Registers a fresh oneshot receiver for the next renegotiation answer and
+    /// returns its generation id, used to find-and-remove this exact entry if
+    /// the renegotiation fails or times out (see `discard_pending_answer`).
+    fn push_pending_answer(
+        &self,
+        tx: tokio::sync::oneshot::Sender<RTCSessionDescription>,
+    ) -> u64 {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.pending_answers.lock().unwrap().push_back((generation, tx));
+        generation
+    }
+
+    /// Removes this generation's entry if it is still queued (i.e. no answer
+    /// arrived for it yet). Called on every failure/timeout exit of
+    /// `renegotiate()` so a dead sender never lingers in front of the queue
+    /// and swallows a later renegotiation's real answer.
+    fn discard_pending_answer(&self, generation: u64) {
+        self.pending_answers.lock().unwrap().retain(|(g, _)| *g != generation);
+    }
+
+    /// Pops the oldest still-pending renegotiation's entry — the same
+    /// operation the SdpAnswer dispatch arm performs on a real answer.
+    /// Exposed privately so the FIFO/cleanup invariant can be unit-tested
+    /// without going through actual SDP negotiation.
+    #[cfg(test)]
+    fn take_pending_answer(
+        &self,
+    ) -> Option<(u64, tokio::sync::oneshot::Sender<RTCSessionDescription>)> {
+        self.pending_answers.lock().unwrap().pop_front()
     }
 
     /// Adds a sendonly H.264 track, keeps its RTCRtpSender, spawns an RTCP
@@ -171,7 +218,23 @@ impl HostPeer {
     pub async fn renegotiate(&self) -> Result<()> {
         let _guard = self.renegotiation_lock.lock().await; // one renegotiation at a time
         let (tx, rx) = tokio::sync::oneshot::channel();
-        *self.pending_answer.lock().unwrap() = Some(tx);
+        let generation = self.push_pending_answer(tx);
+        let result = self.renegotiate_inner(rx).await;
+        // Every exit path funnels through `result` above: on success, our
+        // entry was already popped by the SdpAnswer dispatch (discard is then
+        // a harmless no-op); on any failure/timeout it's still queued and
+        // MUST be removed here so it can't later swallow a subsequent
+        // renegotiation's real answer.
+        if result.is_err() {
+            self.discard_pending_answer(generation);
+        }
+        result
+    }
+
+    async fn renegotiate_inner(
+        &self,
+        rx: tokio::sync::oneshot::Receiver<RTCSessionDescription>,
+    ) -> Result<()> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
         let local = self
@@ -341,5 +404,80 @@ impl ClientPeer {
             .await
             .context("write_rtcp PLI")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_answer() -> RTCSessionDescription {
+        RTCSessionDescription::answer("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string())
+            .unwrap()
+    }
+
+    /// Reproduces the exact race from the review finding without any real SDP
+    /// negotiation or timing: a renegotiation times out (its entry is
+    /// discarded, as `renegotiate()` now does on every failure/timeout exit),
+    /// a second renegotiation starts fresh, and a late answer physically
+    /// arriving afterward must not be routed into the wrong generation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discarded_generation_is_not_delivered_to_next_renegotiation() {
+        let host = HostPeer::new().await.unwrap();
+
+        // Renegotiation 1: pushed, then times out. renegotiate() would call
+        // discard_pending_answer(gen1) on that path; simulate it directly.
+        let (tx1, rx1) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen1 = host.push_pending_answer(tx1);
+        host.discard_pending_answer(gen1);
+        drop(rx1); // the timed-out caller's receiver goes out of scope
+
+        // Renegotiation 2 starts fresh (as it would after the lock is
+        // released and reacquired).
+        let (tx2, rx2) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen2 = host.push_pending_answer(tx2);
+        assert_ne!(gen1, gen2);
+
+        // A late SdpAnswer "arrives" now. The queue must contain only
+        // generation 2's entry — generation 1's was already discarded.
+        let (next_gen, next_tx) = host.take_pending_answer().expect("generation 2 must still be queued");
+        assert_eq!(next_gen, gen2, "a discarded generation must not resurface");
+        assert!(host.take_pending_answer().is_none(), "queue must be empty after taking the only entry");
+
+        let answer = dummy_answer();
+        next_tx.send(answer.clone()).unwrap();
+        let got = rx2.await.unwrap();
+        assert_eq!(got.sdp, answer.sdp);
+    }
+
+    /// When two renegotiations are genuinely both still in flight (neither
+    /// discarded), answers must be routed oldest-generation-first, matching
+    /// the ordered data channel's delivery order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_answers_are_routed_fifo_by_generation() {
+        let host = HostPeer::new().await.unwrap();
+
+        let (tx1, rx1) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen1 = host.push_pending_answer(tx1);
+        let (tx2, rx2) = tokio::sync::oneshot::channel::<RTCSessionDescription>();
+        let gen2 = host.push_pending_answer(tx2);
+
+        let (g, tx) = host.take_pending_answer().unwrap();
+        assert_eq!(g, gen1);
+        tx.send(dummy_answer()).unwrap();
+        rx1.await.unwrap();
+
+        let (g, tx) = host.take_pending_answer().unwrap();
+        assert_eq!(g, gen2);
+        tx.send(dummy_answer()).unwrap();
+        rx2.await.unwrap();
+    }
+
+    /// A stray SdpAnswer with nothing queued for it must not panic; the real
+    /// dispatch arm just warns and drops it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn taking_from_an_empty_queue_returns_none() {
+        let host = HostPeer::new().await.unwrap();
+        assert!(host.take_pending_answer().is_none());
     }
 }

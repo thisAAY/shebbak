@@ -10,10 +10,9 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
     let host = HostPeer::new().await.unwrap();
     let client = ClientPeer::new().await.unwrap();
 
-    host.on_client_message(|_m: ClientMessage| {
-        // No client->host data-channel messages are expected in this flow
-        // (SdpAnswer is intercepted internally); registering avoids the
-        // "dropped: no handler" warning path.
+    let (host_msg_tx, mut host_msg_rx) = mpsc::unbounded_channel();
+    host.on_client_message(move |m| {
+        let _ = host_msg_tx.send(m);
     });
     let (client_msg_tx, mut client_msg_rx) = mpsc::unbounded_channel();
     client.on_host_message(move |m| {
@@ -40,6 +39,26 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
     })
     .await
     .expect("data channel did not open in time");
+
+    // An ordinary client->host message must still reach on_client_message:
+    // the SdpAnswer-interception arm in the dispatch match must not swallow
+    // other client message variants. (v2 renamed CloseWindow -> CloseRequest.)
+    let close_req = ClientMessage::CloseRequest { window_id: 1 };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if client.send(&close_req).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("client data channel did not open in time");
+    let got = tokio::time::timeout(Duration::from_secs(5), host_msg_rx.recv())
+        .await
+        .expect("timed out waiting for client message on host")
+        .expect("host message channel closed");
+    assert_eq!(got, close_req);
 
     // 3. Runtime track add, then renegotiate over the control channel.
     let track = host.add_track("win-1").await.unwrap();
