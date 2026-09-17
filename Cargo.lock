@@ -2887,7 +2887,6 @@ name = "srw-transport"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "openh264",
  "serde",
  "serde_json",

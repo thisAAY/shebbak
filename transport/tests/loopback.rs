@@ -1,3 +1,4 @@
+use srw_core::blit::{chunk_blit, BlitAssembler};
 use srw_core::protocol::{ClientMessage, HostMessage};
 use srw_transport::peer::{ClientPeer, HostPeer};
 use std::time::Duration;
@@ -5,38 +6,53 @@ use tokio::sync::mpsc;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn data_channel_roundtrip_over_local_peers() {
+async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
     let host = HostPeer::new().await.unwrap();
-    let _track = host.add_track("win-1").await.unwrap();
-    let client = ClientPeer::new(1).await.unwrap();
+    let client = ClientPeer::new().await.unwrap();
 
-    let (host_rx_tx, mut host_rx) = mpsc::unbounded_channel();
-    host.on_client_message(move |m| {
-        let _ = host_rx_tx.send(m);
+    host.on_client_message(|_m: ClientMessage| {
+        // No client->host data-channel messages are expected in this flow
+        // (SdpAnswer is intercepted internally); registering avoids the
+        // "dropped: no handler" warning path.
     });
-    let (client_rx_tx, mut client_rx) = mpsc::unbounded_channel();
+    let (client_msg_tx, mut client_msg_rx) = mpsc::unbounded_channel();
     client.on_host_message(move |m| {
-        let _ = client_rx_tx.send(m);
+        let _ = client_msg_tx.send(m);
     });
     let (track_tx, mut track_rx) = mpsc::unbounded_channel();
-    client.on_track(move |id, _t| {
-        let _ = track_tx.send(id);
+    client.on_track(move |id, t| {
+        let _ = track_tx.send((id, t));
     });
 
-    // Direct SDP exchange, no HTTP.
+    // 1. Connect with ZERO tracks. Direct SDP exchange, no HTTP.
     let offer = client.offer().await.unwrap();
     let answer = host.answer(offer).await.unwrap();
     client.accept_answer(answer).await.unwrap();
 
-    // Write a few dummy samples so the client's on_track callback fires
-    // (webrtc-rs only fires on_track once media/RTP starts flowing).
-    let t = _track.clone();
-    tokio::spawn(async move {
+    // 2. Await data channel open: retry a host send until it succeeds.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if host.send(&HostMessage::WindowClosed { window_id: 0 }).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("data channel did not open in time");
+
+    // 3. Runtime track add, then renegotiate over the control channel.
+    let track = host.add_track("win-1").await.unwrap();
+    host.renegotiate().await.unwrap();
+
+    // 4. Sample writer, held so a panic surfaces at the end of the test.
+    let writer_track = track.clone();
+    let writer = tokio::spawn(async move {
         let black = srw_core::pixels::BgraFrame { width: 64, height: 64, data: vec![0; 64 * 64 * 4] };
         let mut enc = srw_transport::codec::H264Encoder::new().unwrap();
         loop {
             if let Ok(Some(au)) = enc.encode_bgra(&black) {
-                let _ = t
+                let _ = writer_track
                     .write_sample(&webrtc::media::Sample {
                         data: au.into(),
                         duration: Duration::from_millis(33),
@@ -48,35 +64,56 @@ async fn data_channel_roundtrip_over_local_peers() {
         }
     });
 
-    // Client → host over the control channel.
-    let msg = ClientMessage::CloseWindow { window_id: 1 };
-    tokio::time::timeout(Duration::from_secs(15), async {
-        // Retry until the channel opens.
+    // 5. The client's on_track fires with the new track, and RTP flows.
+    let (track_id, remote_track) = tokio::time::timeout(Duration::from_secs(5), track_rx.recv())
+        .await
+        .expect("timed out waiting for on_track")
+        .expect("on_track channel closed");
+    assert_eq!(track_id, "win-1");
+    tokio::time::timeout(Duration::from_secs(5), remote_track.read_rtp())
+        .await
+        .expect("timed out waiting for RTP")
+        .expect("read_rtp failed");
+
+    // 6. PLI path: client sends a PLI RTCP packet; host's on_pli fires.
+    let (pli_tx, mut pli_rx) = mpsc::unbounded_channel();
+    host.on_pli(move |tid| {
+        let _ = pli_tx.send(tid);
+    });
+    client.write_pli(remote_track.ssrc()).await.unwrap();
+    let pli_track_id = tokio::time::timeout(Duration::from_secs(5), pli_rx.recv())
+        .await
+        .expect("timed out waiting for PLI")
+        .expect("pli channel closed");
+    assert_eq!(pli_track_id, "win-1");
+
+    // 7. Blit roundtrip over the control channel, reassembled client-side.
+    let payload = vec![0x42u8; 40_000];
+    for msg in chunk_blit(7, 1, &payload) {
+        host.send(&msg).await.unwrap();
+    }
+    let mut assembler = BlitAssembler::new();
+    let reassembled = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if client.send(&msg).await.is_ok() {
-                break;
+            let msg = client_msg_rx.recv().await.expect("client message channel closed");
+            if let Some(result) = assembler.push(&msg) {
+                return result;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .unwrap();
-    let got = tokio::time::timeout(Duration::from_secs(15), host_rx.recv()).await.unwrap().unwrap();
-    assert_eq!(got, msg);
+    .expect("timed out waiting for blit reassembly");
+    assert_eq!(reassembled, (7, payload));
 
-    // Host → client.
-    let hmsg = HostMessage::WindowClosed { window_id: 1 };
-    host.send(&hmsg).await.unwrap();
-    let got = tokio::time::timeout(Duration::from_secs(15), client_rx.recv()).await.unwrap().unwrap();
-    assert_eq!(got, hmsg);
+    // 8. Runtime track remove, then renegotiate again; must not error.
+    host.remove_track("win-1").await.unwrap();
+    host.renegotiate().await.unwrap();
 
-    // The host's track appears client-side with the binding key "win-1".
-    let tid = tokio::time::timeout(Duration::from_secs(20), track_rx.recv()).await;
-    match tid {
-        Ok(Some(id)) => assert_eq!(id, "win-1"),
-        _ => panic!("no remote track arrived"),
-    }
+    // Sample writer must still be running (no panic) at this point.
+    assert!(!writer.is_finished());
+    writer.abort();
 
+    // 9. Close both peers.
     client.close().await;
     host.close().await;
 }
