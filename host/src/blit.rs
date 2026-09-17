@@ -15,7 +15,7 @@ const BLIT_HZ_INTERVAL: Duration = Duration::from_millis(100); // ~10 Hz
 pub fn start_blit(window_id: WindowId, peer: Arc<HostPeer>, rt: tokio::runtime::Handle) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
-    let _ = std::thread::Builder::new().name(format!("blit-{window_id}")).spawn(move || {
+    let spawned = std::thread::Builder::new().name(format!("blit-{window_id}")).spawn(move || {
         let mut last_rgba: Option<Vec<u8>> = None;
         let mut seq: u32 = 0;
         let mut failures = 0u32;
@@ -55,5 +55,8 @@ pub fn start_blit(window_id: WindowId, peer: Arc<HostPeer>, rt: tokio::runtime::
             }
         }
     });
+    if let Err(e) = spawned {
+        warn!("blit {window_id}: failed to spawn blit thread: {e}");
+    }
     stop
 }
