@@ -1,3 +1,17 @@
 /target
+
+# Internal docs, plans, and working notes (kept local, not published)
+/docs/
+/plan-graph.json
+
+# AI / tooling workspaces
 .superpowers/
 .archeyes/
+.claude/
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
