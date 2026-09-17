@@ -27,26 +27,38 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // List apps and pick one or more to share, by pid.
-    let apps = list_apps()?;
-    println!("{:<4} {:<8} {:<24} windows", "idx", "pid", "app");
-    for (i, a) in apps.iter().enumerate() {
-        println!("{:<4} {:<8} {:<24} {}", i, a.pid, a.app_name, a.window_titles.join(" | "));
-    }
-    print!("app indices to share (comma-separated): ");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let pids: Vec<i32> = line
-        .trim()
-        .split(',')
-        .map(|s| -> Result<i32> {
-            let idx: usize = s.trim().parse()?;
-            anyhow::ensure!(idx < apps.len(), "index {idx} out of range");
-            Ok(apps[idx].pid)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    anyhow::ensure!(!pids.is_empty(), "pick at least one app");
+    // List apps and pick one or more to share, by pid. `SRW_SHARE_PIDS`
+    // (comma-separated pids) skips the interactive prompt for scripting
+    // (e.g. scripts/menu_blit_test.sh) and reconnect testing.
+    let pids: Vec<i32> = if let Ok(raw) = std::env::var("SRW_SHARE_PIDS") {
+        let pids: Vec<i32> = raw
+            .split(',')
+            .map(|s| -> Result<i32> { Ok(s.trim().parse()?) })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(!pids.is_empty(), "SRW_SHARE_PIDS must list at least one pid");
+        pids
+    } else {
+        let apps = list_apps()?;
+        println!("{:<4} {:<8} {:<24} windows", "idx", "pid", "app");
+        for (i, a) in apps.iter().enumerate() {
+            println!("{:<4} {:<8} {:<24} {}", i, a.pid, a.app_name, a.window_titles.join(" | "));
+        }
+        print!("app indices to share (comma-separated): ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        let pids: Vec<i32> = line
+            .trim()
+            .split(',')
+            .map(|s| -> Result<i32> {
+                let idx: usize = s.trim().parse()?;
+                anyhow::ensure!(idx < apps.len(), "index {idx} out of range");
+                Ok(apps[idx].pid)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(!pids.is_empty(), "pick at least one app");
+        pids
+    };
 
     // Host display scale for capture pixel size. M1: assume the main display's
     // scale; 2.0 on retina Macs. Read it from CGDisplay.
