@@ -88,6 +88,19 @@ pub struct BgraFrame {
     pub data: Vec<u8>,
 }
 
+/// A tightly packed 8-bit RGBA image with **unpremultiplied** alpha.
+///
+/// Unlike [`BgraFrame`] (which backs the live video path), this is the
+/// wire format for one-shot window snapshots (e.g. the transient-blit
+/// source): RGBA8, row-major, no padding, alpha not premultiplied so it
+/// composites correctly once decoded on the client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
 /// Tightly packed I420 planes.
 #[derive(Debug, Clone)]
 pub struct I420Frame {
