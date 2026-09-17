@@ -18,7 +18,7 @@ pub enum TrackerEvent {
     TitleChanged { window_id: WindowId, title: String },
 }
 
-struct Tracked { info: WindowInfo, pid: i32, kind: WindowKind, minimized: bool }
+struct Tracked { info: WindowInfo, pid: i32, kind: WindowKind, minimized: bool, last_unminimized_size: (f64, f64) }
 
 pub struct AppTracker {
     pids: HashSet<i32>,
@@ -63,6 +63,7 @@ impl AppTracker {
             });
             self.live.insert(w.info.id, Tracked {
                 info: w.info.clone(), pid: w.pid, kind, minimized: false,
+                last_unminimized_size: (w.info.width, w.info.height),
             });
             if w.minimized {
                 events.push(TrackerEvent::Minimized { window_id: w.info.id });
@@ -75,25 +76,37 @@ impl AppTracker {
             let Some(t) = self.live.get_mut(&w.info.id) else { continue; };
             if w.minimized != t.minimized {
                 t.minimized = w.minimized;
-                events.push(if w.minimized {
-                    TrackerEvent::Minimized { window_id: w.info.id }
+                if w.minimized {
+                    events.push(TrackerEvent::Minimized { window_id: w.info.id });
                 } else {
-                    TrackerEvent::Restored { window_id: w.info.id }
-                });
+                    events.push(TrackerEvent::Restored { window_id: w.info.id });
+                    // Emit catch-up Resized if size changed while minimized
+                    if (w.info.width, w.info.height) != t.last_unminimized_size && t.kind != WindowKind::Transient {
+                        events.push(TrackerEvent::Resized {
+                            window_id: w.info.id, width: w.info.width, height: w.info.height,
+                        });
+                    }
+                }
             }
-            if t.kind != WindowKind::Transient && !t.minimized {
+            // Resized: only while not minimized, not for Transient
+            if t.kind != WindowKind::Transient && !t.minimized && !w.minimized {
                 if (w.info.width, w.info.height) != (t.info.width, t.info.height) {
                     events.push(TrackerEvent::Resized {
                         window_id: w.info.id, width: w.info.width, height: w.info.height,
                     });
                 }
-                if w.info.title != t.info.title {
-                    events.push(TrackerEvent::TitleChanged {
-                        window_id: w.info.id, title: w.info.title.clone(),
-                    });
-                }
             }
+            // TitleChanged: fires regardless of minimized state or kind
+            if w.info.title != t.info.title {
+                events.push(TrackerEvent::TitleChanged {
+                    window_id: w.info.id, title: w.info.title.clone(),
+                });
+            }
+            // Update tracked state and last_unminimized_size
             t.info = w.info.clone();
+            if !w.minimized {
+                t.last_unminimized_size = (w.info.width, w.info.height);
+            }
         }
 
         events
@@ -218,5 +231,53 @@ mod tests {
         assert_eq!(t.kind_of(1), Some(WindowKind::Normal));
         assert_eq!(t.geometry(1).unwrap().width, 800.0);
         assert_eq!(t.kind_of(99), None);
+    }
+
+    #[test]
+    fn resize_while_minimized_emits_resized_on_restore() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        // Minimize
+        let mut min = normal(1, 100); min.minimized = true; min.on_screen = false;
+        t.diff(vec![min.clone()]);
+        // Resize while minimized
+        min.info.width = 900.0;
+        min.info.height = 700.0;
+        let ev = t.diff(vec![min.clone()]);
+        assert!(ev.is_empty(), "no event while minimized");
+        // Restore - should emit Restored + catch-up Resized
+        let restored = snap(1, 100, 0, AxRole::Window, 10.0, 20.0, 900.0, 700.0, "win", false);
+        let ev = t.diff(vec![restored]);
+        assert_eq!(ev.len(), 2, "expect Restored + Resized, got {:?}", ev);
+        assert_eq!(ev[0], TrackerEvent::Restored { window_id: 1 });
+        assert_eq!(ev[1], TrackerEvent::Resized { window_id: 1, width: 900.0, height: 700.0 });
+        // geometry reflects current state
+        assert_eq!(t.geometry(1).unwrap().width, 900.0);
+    }
+
+    #[test]
+    fn title_change_fires_while_minimized_and_for_transients() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        // Minimize and change title
+        let mut min = normal(1, 100); min.minimized = true; min.on_screen = false;
+        t.diff(vec![min.clone()]);
+        min.info.title = "renamed".into();
+        let ev = t.diff(vec![min]);
+        assert!(ev.contains(&TrackerEvent::TitleChanged { window_id: 1, title: "renamed".into() }),
+                "TitleChanged must fire while minimized, got {:?}", ev);
+    }
+
+    #[test]
+    fn transient_title_change_fires() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let menu = snap(2, 100, 101, AxRole::Unknown, 40.0, 60.0, 200.0, 300.0, "menu", false);
+        t.diff(vec![menu, normal(1, 100)]);
+        // Transient title change
+        let menu_renamed = snap(2, 100, 101, AxRole::Unknown, 40.0, 60.0, 200.0, 300.0, "menu renamed", false);
+        let ev = t.diff(vec![menu_renamed, normal(1, 100)]);
+        assert!(ev.contains(&TrackerEvent::TitleChanged { window_id: 2, title: "menu renamed".into() }),
+                "TitleChanged must fire for transients, got {:?}", ev);
     }
 }
