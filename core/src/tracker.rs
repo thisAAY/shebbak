@@ -1,139 +1,222 @@
-use crate::model::WindowInfo;
-use crate::protocol::{HostMessage, WindowId};
+use crate::classify::{classify, parent_for, parent_offset};
+use crate::model::{SnapshotWindow, WindowInfo};
+use crate::protocol::{WindowId, WindowKind};
 use std::collections::{HashMap, HashSet};
 
-/// Anything that can produce the current on-screen window list.
-/// The macOS implementation (CGWindowList) lives in the capture crate;
-/// tests feed synthetic snapshots.
 pub trait WindowSnapshotSource {
-    fn snapshot(&mut self) -> Vec<WindowInfo>;
+    /// Current windows of interest, front-to-back order.
+    fn snapshot(&mut self) -> Vec<SnapshotWindow>;
 }
 
-/// Polls snapshots and diffs them into protocol events for watched windows.
-pub struct WindowTracker {
-    last: HashMap<WindowId, WindowInfo>,
-    watched: HashSet<WindowId>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackerEvent {
+    Opened { window: SnapshotWindow, kind: WindowKind, parent_id: Option<WindowId>, offset_x: f64, offset_y: f64 },
+    Closed { window_id: WindowId },
+    Minimized { window_id: WindowId },
+    Restored { window_id: WindowId },
+    Resized { window_id: WindowId, width: f64, height: f64 },
+    TitleChanged { window_id: WindowId, title: String },
 }
 
-impl WindowTracker {
-    pub fn new(initial: Vec<WindowInfo>, watched: &[WindowId]) -> Self {
-        let watched: HashSet<WindowId> = watched.iter().copied().collect();
-        let last = initial
-            .into_iter()
-            .filter(|w| watched.contains(&w.id))
-            .map(|w| (w.id, w))
-            .collect();
-        Self { last, watched }
+struct Tracked { info: WindowInfo, pid: i32, kind: WindowKind, minimized: bool }
+
+pub struct AppTracker {
+    pids: HashSet<i32>,
+    live: HashMap<WindowId, Tracked>,
+}
+
+impl AppTracker {
+    pub fn new(pids: &[i32]) -> Self {
+        Self { pids: pids.iter().copied().collect(), live: HashMap::new() }
     }
 
-    pub fn diff(&mut self, snapshot: Vec<WindowInfo>) -> Vec<HostMessage> {
-        let now: HashMap<WindowId, WindowInfo> = snapshot
-            .into_iter()
-            .filter(|w| self.watched.contains(&w.id))
-            .map(|w| (w.id, w))
-            .collect();
-
+    pub fn diff(&mut self, snapshot: Vec<SnapshotWindow>) -> Vec<TrackerEvent> {
+        let ours: Vec<SnapshotWindow> =
+            snapshot.into_iter().filter(|w| self.pids.contains(&w.pid)).collect();
+        let now_ids: HashSet<WindowId> = ours.iter().map(|w| w.info.id).collect();
         let mut events = Vec::new();
-        for (id, prev) in &self.last {
-            match now.get(id) {
-                None => {
-                    events.push(HostMessage::WindowClosed { window_id: *id });
-                    self.watched.remove(id);
-                }
-                Some(cur) => {
-                    if (cur.width, cur.height) != (prev.width, prev.height) {
-                        events.push(HostMessage::WindowResized {
-                            window_id: *id,
-                            width: cur.width,
-                            height: cur.height,
-                        });
+
+        // Closes first.
+        let gone: Vec<WindowId> = self.live.keys().copied().filter(|id| !now_ids.contains(id)).collect();
+        for id in gone {
+            self.live.remove(&id);
+            events.push(TrackerEvent::Closed { window_id: id });
+        }
+
+        // Opens, in front-to-back snapshot order.
+        for w in &ours {
+            if self.live.contains_key(&w.info.id) { continue; }
+            let kind = classify(w.layer, w.ax_role);
+            let (parent_id, ox, oy) = if kind == WindowKind::Normal {
+                (None, 0.0, 0.0)
+            } else {
+                match parent_for(w, &ours) {
+                    Some(p) => {
+                        let (ox, oy) = parent_offset(&p.info, &w.info);
+                        (Some(p.info.id), ox, oy)
                     }
-                    if cur.title != prev.title {
-                        events.push(HostMessage::WindowTitleChanged {
-                            window_id: *id,
-                            title: cur.title.clone(),
-                        });
-                    }
+                    None => (None, 0.0, 0.0),
                 }
+            };
+            events.push(TrackerEvent::Opened {
+                window: w.clone(), kind, parent_id, offset_x: ox, offset_y: oy,
+            });
+            self.live.insert(w.info.id, Tracked {
+                info: w.info.clone(), pid: w.pid, kind, minimized: false,
+            });
+            if w.minimized {
+                events.push(TrackerEvent::Minimized { window_id: w.info.id });
+                self.live.get_mut(&w.info.id).unwrap().minimized = true;
             }
         }
-        self.last = now;
+
+        // Updates.
+        for w in &ours {
+            let Some(t) = self.live.get_mut(&w.info.id) else { continue; };
+            if w.minimized != t.minimized {
+                t.minimized = w.minimized;
+                events.push(if w.minimized {
+                    TrackerEvent::Minimized { window_id: w.info.id }
+                } else {
+                    TrackerEvent::Restored { window_id: w.info.id }
+                });
+            }
+            if t.kind != WindowKind::Transient && !t.minimized {
+                if (w.info.width, w.info.height) != (t.info.width, t.info.height) {
+                    events.push(TrackerEvent::Resized {
+                        window_id: w.info.id, width: w.info.width, height: w.info.height,
+                    });
+                }
+                if w.info.title != t.info.title {
+                    events.push(TrackerEvent::TitleChanged {
+                        window_id: w.info.id, title: w.info.title.clone(),
+                    });
+                }
+            }
+            t.info = w.info.clone();
+        }
+
         events
     }
 
-    pub fn geometry(&self, id: WindowId) -> Option<&WindowInfo> {
-        self.last.get(&id)
+    pub fn geometry(&self, id: WindowId) -> Option<&WindowInfo> { self.live.get(&id).map(|t| &t.info) }
+    pub fn pid_of(&self, id: WindowId) -> Option<i32> { self.live.get(&id).map(|t| t.pid) }
+    pub fn kind_of(&self, id: WindowId) -> Option<WindowKind> { self.live.get(&id).map(|t| t.kind) }
+    pub fn pid_map(&self) -> HashMap<WindowId, i32> {
+        self.live.iter().map(|(id, t)| (*id, t.pid)).collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::HostMessage;
+    use crate::model::{AxRole, SnapshotWindow, WindowInfo};
+    use crate::protocol::WindowKind;
 
-    fn win(id: u32, title: &str, x: f64, y: f64, w: f64, h: f64) -> WindowInfo {
-        WindowInfo { id, title: title.into(), x, y, width: w, height: h }
+    fn snap(id: u32, pid: i32, layer: i64, role: AxRole, x: f64, y: f64, w: f64, h: f64,
+            title: &str, minimized: bool) -> SnapshotWindow {
+        SnapshotWindow {
+            info: WindowInfo { id, title: title.into(), x, y, width: w, height: h },
+            pid, layer, on_screen: !minimized, ax_role: role, minimized,
+        }
     }
-
-    fn tracker() -> WindowTracker {
-        WindowTracker::new(
-            vec![win(1, "one", 0.0, 0.0, 100.0, 100.0), win(2, "two", 50.0, 50.0, 200.0, 200.0)],
-            &[1, 2],
-        )
-    }
-
-    #[test]
-    fn no_change_emits_nothing() {
-        let mut t = tracker();
-        let events = t.diff(vec![
-            win(1, "one", 0.0, 0.0, 100.0, 100.0),
-            win(2, "two", 50.0, 50.0, 200.0, 200.0),
-        ]);
-        assert!(events.is_empty());
+    fn normal(id: u32, pid: i32) -> SnapshotWindow {
+        snap(id, pid, 0, AxRole::Window, 10.0, 20.0, 800.0, 600.0, "win", false)
     }
 
     #[test]
-    fn resize_title_each_emit() {
-        let mut t = tracker();
-        let events = t.diff(vec![
-            win(1, "renamed", 10.0, 0.0, 100.0, 150.0),
-            win(2, "two", 50.0, 50.0, 200.0, 200.0),
-        ]);
-        assert!(events.contains(&HostMessage::WindowResized { window_id: 1, width: 100.0, height: 150.0 }));
-        assert!(events.contains(&HostMessage::WindowTitleChanged { window_id: 1, title: "renamed".into() }));
-        assert_eq!(events.len(), 2);
+    fn new_window_of_shared_pid_opens_with_kind() {
+        let mut t = AppTracker::new(&[100]);
+        let ev = t.diff(vec![normal(1, 100)]);
+        assert_eq!(ev.len(), 1);
+        match &ev[0] {
+            TrackerEvent::Opened { window, kind: WindowKind::Normal, parent_id: None, .. } =>
+                assert_eq!(window.info.id, 1),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
-    fn missing_window_emits_closed_once() {
-        let mut t = tracker();
-        let events = t.diff(vec![win(2, "two", 50.0, 50.0, 200.0, 200.0)]);
-        assert_eq!(events, vec![HostMessage::WindowClosed { window_id: 1 }]);
-        // Next diff: window 1 stays gone, no repeat.
-        let events = t.diff(vec![win(2, "two", 50.0, 50.0, 200.0, 200.0)]);
-        assert!(events.is_empty());
+    fn unshared_pid_is_ignored() {
+        let mut t = AppTracker::new(&[100]);
+        assert!(t.diff(vec![normal(1, 999)]).is_empty());
     }
 
     #[test]
-    fn unwatched_windows_are_ignored() {
-        let mut t = tracker();
-        let events = t.diff(vec![
-            win(1, "one", 0.0, 0.0, 100.0, 100.0),
-            win(2, "two", 50.0, 50.0, 200.0, 200.0),
-            win(99, "noise", 5.0, 5.0, 10.0, 10.0),
-        ]);
-        assert!(events.is_empty());
-        assert!(t.geometry(99).is_none());
+    fn transient_opens_parented_to_frontmost_normal_with_offset() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let menu = snap(2, 100, 101, AxRole::Unknown, 40.0, 60.0, 200.0, 300.0, "", false);
+        let ev = t.diff(vec![menu, normal(1, 100)]); // menu frontmost
+        match &ev[0] {
+            TrackerEvent::Opened { kind: WindowKind::Transient, parent_id: Some(1), offset_x, offset_y, .. } => {
+                assert_eq!((*offset_x, *offset_y), (30.0, 40.0)); // 40-10, 60-20
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
-    fn geometry_reflects_latest_diff() {
-        let mut t = tracker();
-        t.diff(vec![
-            win(1, "one", 10.0, 20.0, 100.0, 100.0),
-            win(2, "two", 50.0, 50.0, 200.0, 200.0),
-        ]);
-        let g = t.geometry(1).unwrap();
-        assert_eq!((g.x, g.y), (10.0, 20.0));
+    fn gone_window_closes_and_can_reopen() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let ev = t.diff(vec![]);
+        assert_eq!(ev, vec![TrackerEvent::Closed { window_id: 1 }]);
+        // reappears (e.g. app reopened a doc window with the same CGWindowID)
+        let ev = t.diff(vec![normal(1, 100)]);
+        assert!(matches!(ev[0], TrackerEvent::Opened { .. }));
+    }
+
+    #[test]
+    fn minimize_restore_cycle() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let mut min = normal(1, 100); min.minimized = true; min.on_screen = false;
+        let ev = t.diff(vec![min.clone()]);
+        assert_eq!(ev, vec![TrackerEvent::Minimized { window_id: 1 }]);
+        let ev = t.diff(vec![min]); // still minimized: no repeat
+        assert!(ev.is_empty());
+        let ev = t.diff(vec![normal(1, 100)]);
+        assert_eq!(ev, vec![TrackerEvent::Restored { window_id: 1 }]);
+    }
+
+    #[test]
+    fn born_minimized_opens_then_minimizes() {
+        let mut t = AppTracker::new(&[100]);
+        let mut w = normal(1, 100); w.minimized = true; w.on_screen = false;
+        let ev = t.diff(vec![w]);
+        assert!(matches!(ev[0], TrackerEvent::Opened { .. }));
+        assert_eq!(ev[1], TrackerEvent::Minimized { window_id: 1 });
+    }
+
+    #[test]
+    fn resize_and_title_emit_moves_do_not() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        let moved_resized = snap(1, 100, 0, AxRole::Window, 500.0, 500.0, 900.0, 700.0, "renamed", false);
+        let ev = t.diff(vec![moved_resized]);
+        assert_eq!(ev.len(), 2); // resize + title, NO move event
+        assert!(ev.contains(&TrackerEvent::Resized { window_id: 1, width: 900.0, height: 700.0 }));
+        assert!(ev.contains(&TrackerEvent::TitleChanged { window_id: 1, title: "renamed".into() }));
+    }
+
+    #[test]
+    fn pid_map_tracks_live_windows() {
+        let mut t = AppTracker::new(&[100, 200]);
+        t.diff(vec![normal(1, 100), normal(2, 200)]);
+        let map = t.pid_map();
+        assert_eq!(map.get(&1), Some(&100));
+        assert_eq!(map.get(&2), Some(&200));
+        t.diff(vec![normal(2, 200)]);
+        assert!(t.pid_map().get(&1).is_none());
+    }
+
+    #[test]
+    fn geometry_and_kind_reflect_state() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        assert_eq!(t.kind_of(1), Some(WindowKind::Normal));
+        assert_eq!(t.geometry(1).unwrap().width, 800.0);
+        assert_eq!(t.kind_of(99), None);
     }
 }
