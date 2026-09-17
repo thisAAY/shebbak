@@ -2869,6 +2869,7 @@ name = "srw-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "png",
  "softbuffer",
  "srw-core",
  "srw-transport",

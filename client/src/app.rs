@@ -14,14 +14,26 @@ use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId as WinitWindowId, WindowLevel};
 
-/// What a mirror currently has to paint. `Image` is populated by Task 18's
-/// PNG-blit decode path (transient windows); until then it's never
-/// constructed, only matched (kept exhaustive so `redraw` compiles today).
+/// What a mirror currently has to paint. `Image` holds a decoded transient
+/// PNG blit (Task 18).
 pub enum MirrorContent {
     None,
     Video(BgraFrame),
-    #[allow(dead_code)]
     Image(RgbaImage),
+}
+
+/// Decode a transient blit PNG into an RGBA image. `EXPAND | ALPHA` forces
+/// the output to RGBA8 regardless of the source's bit depth/color type, so
+/// the `ColorType::Rgba` check below is a guarantee, not a guess.
+fn decode_png(bytes: &[u8]) -> anyhow::Result<RgbaImage> {
+    let mut decoder = png::Decoder::new(bytes);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+    let mut reader = decoder.read_info()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+    anyhow::ensure!(info.color_type == png::ColorType::Rgba, "expected RGBA after transform");
+    buf.truncate(info.buffer_size());
+    Ok(RgbaImage { width: info.width, height: info.height, data: buf })
 }
 
 pub struct Mirror {
@@ -46,6 +58,9 @@ pub struct App {
     binder: TrackBinder<()>,
     /// Frames that arrived before the mirror window existed, keyed by track_id.
     early_frames: HashMap<String, BgraFrame>,
+    /// Transient blits that arrived before their mirror window existed,
+    /// keyed by the remote window id (transients have no track_id).
+    early_blits: HashMap<WindowId, RgbaImage>,
     mirrors: HashMap<WinitWindowId, Mirror>,
     by_remote: HashMap<WindowId, WinitWindowId>,
     by_track: HashMap<String, WinitWindowId>,
@@ -62,6 +77,7 @@ impl App {
             ui_rx,
             binder: TrackBinder::new(),
             early_frames: HashMap::new(),
+            early_blits: HashMap::new(),
             mirrors: HashMap::new(),
             by_remote: HashMap::new(),
             by_track: HashMap::new(),
@@ -149,10 +165,26 @@ impl App {
                     self.destroy_mirror_by_remote(window_id);
                 }
                 UiEvent::Host(HostMessage::TransientBlit { .. } | HostMessage::SdpOffer { .. }) => {
-                    // TransientBlit: decoded/rendered by Task 18's net layer.
+                    // TransientBlit: net.rs's BlitAssembler intercepts these
+                    // chunks and surfaces assembled images as `UiEvent::Blit`
+                    // below — this arm never actually receives one.
                     // SdpOffer: consumed inside ClientPeer itself and never
                     // actually forwarded here — listed for exhaustiveness.
                 }
+                UiEvent::Blit { window_id, png } => match decode_png(&png) {
+                    Ok(img) => match self.by_remote.get(&window_id) {
+                        Some(wid) => {
+                            if let Some(m) = self.mirrors.get_mut(wid) {
+                                m.content = MirrorContent::Image(img);
+                                m.window.request_redraw();
+                            }
+                        }
+                        None => {
+                            self.early_blits.insert(window_id, img);
+                        }
+                    },
+                    Err(e) => warn!("blit decode failed for {window_id}: {e}"),
+                },
                 UiEvent::Disconnected => {
                     eprintln!("connection lost; exiting");
                     self.mirrors.clear();
@@ -217,10 +249,13 @@ impl App {
         let context = Context::new(window.clone()).expect("softbuffer context");
         let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
         let wid = window.id();
+        // Transients (no track) seed from early_blits; track-backed windows
+        // seed from early_frames. A window is never both.
         let content = self
-            .early_frames
-            .remove(&ann.track_id)
-            .map(MirrorContent::Video)
+            .early_blits
+            .remove(&ann.info.id)
+            .map(MirrorContent::Image)
+            .or_else(|| self.early_frames.remove(&ann.track_id).map(MirrorContent::Video))
             .unwrap_or(MirrorContent::None);
         let mirror = Mirror {
             window,
@@ -245,6 +280,7 @@ impl App {
     }
 
     fn destroy_mirror_by_remote(&mut self, remote: WindowId) {
+        self.early_blits.remove(&remote);
         if let Some(wid) = self.by_remote.remove(&remote) {
             self.mirrors.remove(&wid);
             // Collect the track ids bound to this mirror before dropping them
@@ -301,9 +337,34 @@ impl App {
                     }
                 }
             }
-            // Task 18 decodes the transient PNG blit into this; stay blank
-            // until then.
-            MirrorContent::Image(_) => buf.fill(0xFF202020),
+            MirrorContent::Image(img) => {
+                // Nearest-neighbor scale image (RGBA, unpremultiplied) →
+                // buffer (ARGB u32, premultiplied) for the compositor. The
+                // window was created `with_transparent(true)` so a genuine
+                // alpha byte lets softbuffer/macOS render real transparency
+                // (rounded corners/shadows on menus come for free).
+                let (fw, fh) = (img.width as usize, img.height as usize);
+                if fw == 0 || fh == 0 {
+                    return;
+                }
+                let (dw, dh) = (size.width as usize, size.height as usize);
+                for dy in 0..dh {
+                    let sy = dy * fh / dh;
+                    for dx in 0..dw {
+                        let sx = dx * fw / dw;
+                        let si = (sy * fw + sx) * 4;
+                        let (r, g, b, a) = (
+                            img.data[si] as u32,
+                            img.data[si + 1] as u32,
+                            img.data[si + 2] as u32,
+                            img.data[si + 3] as u32,
+                        );
+                        // Premultiply for the compositor; alpha in the top byte.
+                        buf[dy * dw + dx] =
+                            (a << 24) | ((r * a / 255) << 16) | ((g * a / 255) << 8) | (b * a / 255);
+                    }
+                }
+            }
         }
         let _ = buf.present();
     }
@@ -377,5 +438,73 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use srw_core::blit::{chunk_blit, BlitAssembler};
+
+    /// Encode a small RGBA image (with partial alpha, to exercise the
+    /// premultiply path in `redraw`) as a real PNG, matching what the host's
+    /// capture pipeline would produce for a transient window.
+    fn encode_test_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(pixels).unwrap();
+        }
+        out
+    }
+
+    /// End-to-end check of the transient-blit path this task wires up:
+    /// `chunk_blit` (host side) → `BlitAssembler::push` (net.rs's
+    /// interception, exercised here the same way the `on_host_message`
+    /// closure drives it) → `decode_png` (app.rs). A multi-chunk image
+    /// forces the assembler to actually reassemble rather than pass through
+    /// a single chunk.
+    #[test]
+    fn blit_roundtrip_through_assembler_and_decode() {
+        // Noisy (not gradient) pixels so PNG's deflate compression can't
+        // shrink this below one chunk — the point is to force a multi-chunk
+        // reassembly, not a single pass-through.
+        let (w, h) = (200u32, 200u32);
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        let mut state: u32 = 0x1234_5678;
+        for _ in 0..(w * h) {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); // LCG
+            let bytes = state.to_le_bytes();
+            pixels.extend_from_slice(&bytes);
+        }
+        let png_bytes = encode_test_png(w, h, &pixels);
+        assert!(png_bytes.len() > srw_core::blit::BLIT_CHUNK_BYTES, "test image should span multiple chunks");
+
+        let chunks = chunk_blit(42, 1, &png_bytes);
+        assert!(chunks.len() > 1);
+
+        let mut assembler = BlitAssembler::new();
+        let mut assembled = None;
+        for chunk in &chunks {
+            if let Some((window_id, png)) = assembler.push(chunk) {
+                assert_eq!(window_id, 42);
+                assembled = Some(png);
+            }
+        }
+        let assembled = assembled.expect("assembler should complete once all chunks arrive");
+        assert_eq!(assembled, png_bytes);
+
+        let img = decode_png(&assembled).expect("decode_png should accept a real RGBA PNG");
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, h);
+        assert_eq!(img.data, pixels);
+    }
+
+    #[test]
+    fn decode_png_rejects_garbage() {
+        assert!(decode_png(b"not a png").is_err());
     }
 }

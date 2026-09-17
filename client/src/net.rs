@@ -16,6 +16,7 @@ pub enum UiEvent {
     Host(HostMessage),
     TrackFrame { track_id: String, frame: BgraFrame },
     TrackOpened { track_id: String },
+    Blit { window_id: srw_core::protocol::WindowId, png: Vec<u8> },
     Disconnected,
 }
 
@@ -41,7 +42,18 @@ pub fn connect(
     {
         let ui = ui_tx.clone();
         let wake = wake.clone();
+        // The closure is `Fn` (webrtc requires re-invoking it per message), so
+        // the assembler's interior mutability needs a lock rather than `&mut`.
+        let assembler = std::sync::Mutex::new(srw_core::blit::BlitAssembler::new());
         peer.on_host_message(move |m| {
+            if matches!(m, HostMessage::TransientBlit { .. }) {
+                if let Some((window_id, png)) = assembler.lock().unwrap().push(&m) {
+                    info!("blit received for window {window_id} ({} bytes)", png.len()); // Task 20's script greps this
+                    let _ = ui.send(UiEvent::Blit { window_id, png });
+                    wake();
+                }
+                return; // chunks never reach the app layer raw
+            }
             let _ = ui.send(UiEvent::Host(m));
             wake();
         });
