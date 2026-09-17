@@ -7,12 +7,32 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId as WinitWindowId, WindowLevel};
+
+/// winit modifiers → CGEventFlags bits (macOS mask constants).
+pub(crate) fn cg_flags(mods: ModifiersState) -> u64 {
+    let mut f = 0u64;
+    if mods.shift_key() {
+        f |= 0x0002_0000; // kCGEventFlagMaskShift
+    }
+    if mods.control_key() {
+        f |= 0x0004_0000; // kCGEventFlagMaskControl
+    }
+    if mods.alt_key() {
+        f |= 0x0008_0000; // kCGEventFlagMaskAlternate
+    }
+    if mods.super_key() {
+        f |= 0x0010_0000; // kCGEventFlagMaskCommand
+    }
+    f
+}
 
 /// What a mirror currently has to paint. `Image` holds a decoded transient
 /// PNG blit (Task 18).
@@ -50,12 +70,18 @@ pub struct Mirror {
     /// bounce straight back out as a client-initiated `ResizeRequest`.
     last_host_size: (f64, f64),
     cursor: PhysicalPosition<f64>,
+    /// Last time a `MouseMove` was sent for this mirror — coalesces
+    /// `CursorMoved` down to ~60 Hz instead of forwarding every event.
+    last_move_sent: Instant,
 }
 
 pub struct App {
     net: Net,
     ui_rx: Receiver<UiEvent>,
     binder: TrackBinder<()>,
+    /// Live modifier state, updated on `WindowEvent::ModifiersChanged`;
+    /// applied to every `KeyEvent` forwarded to the host.
+    modifiers: ModifiersState,
     /// Frames that arrived before the mirror window existed, keyed by track_id.
     early_frames: HashMap<String, BgraFrame>,
     /// Transient blits that arrived before their mirror window existed,
@@ -76,6 +102,7 @@ impl App {
             net,
             ui_rx,
             binder: TrackBinder::new(),
+            modifiers: ModifiersState::empty(),
             early_frames: HashMap::new(),
             early_blits: HashMap::new(),
             mirrors: HashMap::new(),
@@ -267,6 +294,7 @@ impl App {
             minimized: false,
             last_host_size: (ann.info.width, ann.info.height),
             cursor: PhysicalPosition::new(0.0, 0.0),
+            last_move_sent: Instant::now(),
         };
         mirror.window.request_redraw();
         self.mirrors.insert(wid, mirror);
@@ -377,12 +405,60 @@ impl ApplicationHandler for App {
         self.drain(event_loop);
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, wid: WinitWindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, wid: WinitWindowId, event: WindowEvent) {
         match event {
             WindowEvent::RedrawRequested => self.redraw(wid),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::{KeyCode, PhysicalKey};
+                use winit::platform::scancode::PhysicalKeyExtScancode;
+                let Some(m) = self.mirrors.get(&wid) else { return };
+                let down = event.state == ElementState::Pressed;
+                // Local Cmd+Q quits the client; never forwarded.
+                if down
+                    && self.modifiers.super_key()
+                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyQ)
+                {
+                    event_loop.exit();
+                    return;
+                }
+                // On macOS to_scancode() yields the Carbon virtual keycode == CGKeyCode.
+                let Some(code) = event.physical_key.to_scancode() else { return };
+                send_client_msg(
+                    &self.net,
+                    ClientMessage::KeyEvent {
+                        window_id: m.remote_id,
+                        key_code: code as u16,
+                        down,
+                        flags: cg_flags(self.modifiers),
+                    },
+                );
+                // Repeats forward as extra downs — posted CGEvents don't auto-repeat on the host.
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(m) = self.mirrors.get_mut(&wid) {
                     m.cursor = position;
+                    if m.last_move_sent.elapsed() >= Duration::from_millis(16) {
+                        m.last_move_sent = Instant::now();
+                        let scale = m.window.scale_factor();
+                        send_client_msg(
+                            &self.net,
+                            ClientMessage::MouseMove {
+                                window_id: m.remote_id,
+                                x: position.x / scale,
+                                y: position.y / scale,
+                            },
+                        );
+                    }
+                }
+            }
+            WindowEvent::Focused(true) => {
+                if let Some(m) = self.mirrors.get(&wid) {
+                    if m.kind == WindowKind::Normal || m.kind == WindowKind::Sheet {
+                        send_client_msg(&self.net, ClientMessage::FocusChange { window_id: m.remote_id });
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -445,6 +521,15 @@ impl ApplicationHandler for App {
 mod tests {
     use super::*;
     use srw_core::blit::{chunk_blit, BlitAssembler};
+
+    #[test]
+    fn modifier_bits_map_to_cg_masks() {
+        use winit::keyboard::ModifiersState;
+        assert_eq!(cg_flags(ModifiersState::empty()), 0);
+        assert_eq!(cg_flags(ModifiersState::SHIFT), 0x0002_0000);
+        assert_eq!(cg_flags(ModifiersState::SUPER | ModifiersState::SHIFT), 0x0012_0000);
+        assert_eq!(cg_flags(ModifiersState::CONTROL | ModifiersState::ALT), 0x000C_0000);
+    }
 
     /// Encode a small RGBA image (with partial alpha, to exercise the
     /// premultiply path in `redraw`) as a real PNG, matching what the host's
