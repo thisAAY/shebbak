@@ -72,10 +72,13 @@ fn teardown_runtime(rt: WindowRuntime) {
 
 /// Adds a track, starts its encoder pipeline, and starts a capture pushing
 /// into it; wires the result into `runtimes` and `pli_pipelines`. On any
-/// failure after the pipeline is up, the pipeline is stopped before the error
-/// is returned — otherwise its encoder thread (parked on the frame slot)
-/// would never see a shutdown signal and would leak for the life of the
-/// process (nothing else would hold the `Arc<Pipeline>` to stop it later).
+/// failure after the track/pipeline is up, that state is torn down before
+/// the error is returned: the pipeline is stopped (otherwise its encoder
+/// thread, parked on the frame slot, would never see a shutdown signal and
+/// would leak for the life of the process — nothing else holds the
+/// `Arc<Pipeline>` to stop it later), and the track is removed from the peer
+/// (otherwise a dead `track_id` m-line lingers in the SDP all session, with
+/// no `runtimes` entry for the Closed arm to ever clean it up).
 async fn open_track_window(
     peer: &HostPeer,
     rt: &tokio::runtime::Handle,
@@ -86,19 +89,33 @@ async fn open_track_window(
     pli_pipelines: &PliPipelineMap,
 ) -> Result<()> {
     let track = peer.add_track(track_id).await?;
-    let pipeline = Arc::new(Pipeline::start(track, rt.clone(), track_id.to_string())?);
+    // `add_track` isn't a pure constructor: it already registered a sender on
+    // the peer connection and spawned its RTCP drain task. Every failure path
+    // below this point must remove that track again — otherwise a dead
+    // `track_id` m-line lingers in the SDP for the rest of the session (next
+    // renegotiate onward), `runtimes` never got an entry to clean it up via
+    // the Closed arm, and the drain task leaks.
+    let pipeline = match Pipeline::start(track, rt.clone(), track_id.to_string()) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            let _ = peer.remove_track(track_id).await;
+            return Err(e);
+        }
+    };
 
     let (pw, ph) = (even_px(window.info.width, scale), even_px(window.info.height, scale));
     let mut capture: Box<dyn WindowCapture> = match SckCapture::new(window.info.id, pw, ph, 30) {
         Ok(c) => Box::new(c),
         Err(e) => {
             pipeline.stop();
+            let _ = peer.remove_track(track_id).await;
             return Err(e);
         }
     };
     let push_pipe = pipeline.clone();
     if let Err(e) = capture.start(Box::new(move |frame| push_pipe.push(frame))) {
         pipeline.stop();
+        let _ = peer.remove_track(track_id).await;
         return Err(e);
     }
 
@@ -196,6 +213,12 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         if disconnected.load(Ordering::SeqCst) {
+            // Bailing here drops `peer` (an Arc<HostPeer>) without ever
+            // reaching the unconditional-teardown block below — close it
+            // explicitly first, or every failed connect attempt leaks the
+            // ICE/DTLS tasks underneath (main.rs loops right back into
+            // serve_one_offer for the next client).
+            peer.close().await;
             anyhow::bail!("peer disconnected during setup");
         }
         match peer.send(&HostMessage::WindowRestored { window_id: 0 }).await {
@@ -203,7 +226,10 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
             Err(_) if std::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(e) => return Err(e).context("data channel never opened"),
+            Err(e) => {
+                peer.close().await;
+                return Err(e).context("data channel never opened");
+            }
         }
     }
 
@@ -227,6 +253,10 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
     // fixed sleep here — far longer than two back-to-back FFI calls take —
     // makes that race practically impossible without touching AxWatcher
     // itself.
+    // TODO: replace this fixed sleep with a real started-signal from
+    // AxWatcher::spawn (e.g. send the RunLoopHandle only after
+    // CFRunLoopRun() begins, or an explicit "running" rendezvous) so this
+    // isn't timing-dependent at all.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut runtimes: RuntimeMap = HashMap::new();
