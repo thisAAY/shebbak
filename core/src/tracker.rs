@@ -41,9 +41,6 @@ impl WindowTracker {
                     self.watched.remove(id);
                 }
                 Some(cur) => {
-                    if (cur.x, cur.y) != (prev.x, prev.y) {
-                        events.push(HostMessage::WindowMoved { window_id: *id, x: cur.x, y: cur.y });
-                    }
                     if (cur.width, cur.height) != (prev.width, prev.height) {
                         events.push(HostMessage::WindowResized {
                             window_id: *id,
@@ -96,16 +93,15 @@ mod tests {
     }
 
     #[test]
-    fn move_resize_title_each_emit() {
+    fn resize_title_each_emit() {
         let mut t = tracker();
         let events = t.diff(vec![
             win(1, "renamed", 10.0, 0.0, 100.0, 150.0),
             win(2, "two", 50.0, 50.0, 200.0, 200.0),
         ]);
-        assert!(events.contains(&HostMessage::WindowMoved { window_id: 1, x: 10.0, y: 0.0 }));
         assert!(events.contains(&HostMessage::WindowResized { window_id: 1, width: 100.0, height: 150.0 }));
         assert!(events.contains(&HostMessage::WindowTitleChanged { window_id: 1, title: "renamed".into() }));
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

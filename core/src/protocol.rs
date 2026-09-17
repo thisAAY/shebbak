@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 /// Host-side window identifier (CGWindowID on macOS).
 pub type WindowId = u32;
 
+/// Window kind/type classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowKind {
+    Normal,
+    Sheet,
+    Transient,
+}
+
 /// Host → client messages on the control data channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -10,16 +19,27 @@ pub enum HostMessage {
     WindowOpened {
         window_id: WindowId,
         title: String,
-        x: f64,
-        y: f64,
+        kind: WindowKind,
+        parent_id: Option<WindowId>,
+        offset_x: f64,
+        offset_y: f64,
         width: f64,
         height: f64,
-        track_id: String,
+        track_id: Option<String>,
     },
-    WindowMoved { window_id: WindowId, x: f64, y: f64 },
     WindowResized { window_id: WindowId, width: f64, height: f64 },
     WindowTitleChanged { window_id: WindowId, title: String },
+    WindowMinimized { window_id: WindowId },
+    WindowRestored { window_id: WindowId },
     WindowClosed { window_id: WindowId },
+    TransientBlit {
+        window_id: WindowId,
+        seq: u32,
+        chunk_index: u16,
+        chunk_count: u16,
+        data_b64: String,
+    },
+    SdpOffer { sdp: String },
 }
 
 /// Client → host messages on the control data channel.
@@ -33,7 +53,21 @@ pub enum ClientMessage {
         button: MouseButton,
         action: MouseAction,
     },
-    CloseWindow { window_id: WindowId },
+    MouseMove { window_id: WindowId, x: f64, y: f64 },
+    KeyEvent {
+        window_id: WindowId,
+        key_code: u16,
+        down: bool,
+        flags: u64,
+    },
+    FocusChange { window_id: WindowId },
+    ResizeRequest {
+        window_id: WindowId,
+        width: f64,
+        height: f64,
+    },
+    CloseRequest { window_id: WindowId },
+    SdpAnswer { sdp: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,21 +97,52 @@ mod tests {
     }
 
     #[test]
-    fn host_messages_roundtrip() {
+    fn host_messages_roundtrip_v2() {
         let msgs = vec![
             HostMessage::WindowOpened {
                 window_id: 42,
                 title: "Safari".into(),
-                x: 10.0,
-                y: 20.0,
+                kind: WindowKind::Normal,
+                parent_id: None,
+                offset_x: 0.0,
+                offset_y: 0.0,
                 width: 800.0,
                 height: 600.0,
-                track_id: "win-42".into(),
+                track_id: Some("win-42".into()),
             },
-            HostMessage::WindowMoved { window_id: 42, x: 15.0, y: 25.0 },
-            HostMessage::WindowResized { window_id: 42, width: 640.0, height: 480.0 },
-            HostMessage::WindowTitleChanged { window_id: 42, title: "New".into() },
+            HostMessage::WindowOpened {
+                window_id: 43,
+                title: "".into(),
+                kind: WindowKind::Transient,
+                parent_id: Some(42),
+                offset_x: 15.0,
+                offset_y: 30.0,
+                width: 200.0,
+                height: 340.0,
+                track_id: None,
+            },
+            HostMessage::WindowResized {
+                window_id: 42,
+                width: 640.0,
+                height: 480.0,
+            },
+            HostMessage::WindowTitleChanged {
+                window_id: 42,
+                title: "New".into(),
+            },
+            HostMessage::WindowMinimized { window_id: 42 },
+            HostMessage::WindowRestored { window_id: 42 },
             HostMessage::WindowClosed { window_id: 42 },
+            HostMessage::TransientBlit {
+                window_id: 43,
+                seq: 7,
+                chunk_index: 0,
+                chunk_count: 3,
+                data_b64: "aGVsbG8=".into(),
+            },
+            HostMessage::SdpOffer {
+                sdp: "{\"type\":\"offer\"}".into(),
+            },
         ];
         for m in msgs {
             assert_eq!(roundtrip_host(m.clone()), m);
@@ -85,23 +150,36 @@ mod tests {
     }
 
     #[test]
-    fn client_messages_roundtrip() {
+    fn client_messages_roundtrip_v2() {
         let msgs = vec![
             ClientMessage::MouseInput {
                 window_id: 42,
-                x: 100.5,
-                y: 200.5,
+                x: 1.0,
+                y: 2.0,
                 button: MouseButton::Left,
                 action: MouseAction::Down,
             },
-            ClientMessage::MouseInput {
+            ClientMessage::MouseMove {
                 window_id: 42,
-                x: 100.5,
-                y: 200.5,
-                button: MouseButton::Right,
-                action: MouseAction::Up,
+                x: 3.0,
+                y: 4.0,
             },
-            ClientMessage::CloseWindow { window_id: 42 },
+            ClientMessage::KeyEvent {
+                window_id: 42,
+                key_code: 0,
+                down: true,
+                flags: 0x0010_0000,
+            },
+            ClientMessage::FocusChange { window_id: 42 },
+            ClientMessage::ResizeRequest {
+                window_id: 42,
+                width: 500.0,
+                height: 400.0,
+            },
+            ClientMessage::CloseRequest { window_id: 42 },
+            ClientMessage::SdpAnswer {
+                sdp: "{\"type\":\"answer\"}".into(),
+            },
         ];
         for m in msgs {
             assert_eq!(roundtrip_client(m.clone()), m);
@@ -109,20 +187,19 @@ mod tests {
     }
 
     #[test]
-    fn tagged_wire_format_is_stable() {
-        let json = serde_json::to_string(&HostMessage::WindowClosed { window_id: 7 }).unwrap();
-        assert_eq!(json, r#"{"type":"WindowClosed","window_id":7}"#);
-        let json = serde_json::to_string(&ClientMessage::MouseInput {
+    fn tagged_wire_format_is_stable_v2() {
+        let json = serde_json::to_string(&HostMessage::WindowMinimized { window_id: 7 }).unwrap();
+        assert_eq!(json, r#"{"type":"WindowMinimized","window_id":7}"#);
+        let json = serde_json::to_string(&ClientMessage::KeyEvent {
             window_id: 7,
-            x: 1.0,
-            y: 2.0,
-            button: MouseButton::Left,
-            action: MouseAction::Down,
+            key_code: 12,
+            down: false,
+            flags: 0,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"type":"MouseInput","window_id":7,"x":1.0,"y":2.0,"button":"left","action":"down"}"#
+            r#"{"type":"KeyEvent","window_id":7,"key_code":12,"down":false,"flags":0}"#
         );
     }
 }
