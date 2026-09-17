@@ -35,7 +35,7 @@ pub fn connect(
         .enable_all()
         .build()?;
 
-    let peer = rt.block_on(async { ClientPeer::new(2).await })?;
+    let peer = rt.block_on(async { ClientPeer::new().await })?;
     let peer = Arc::new(peer);
 
     {
@@ -99,6 +99,10 @@ async fn read_track(
             return;
         }
     };
+    // Rate-limit decode-error spam (a bad GOP can produce one per frame): log
+    // at most once per second per track, folding the rest into a count.
+    let mut suppressed: u32 = 0;
+    let mut last_warn = std::time::Instant::now() - std::time::Duration::from_secs(1);
     loop {
         let (pkt, _) = match track.read_rtp().await {
             Ok(p) => p,
@@ -115,7 +119,20 @@ async fn read_track(
                     wake();
                 }
                 Ok(None) => {}
-                Err(e) => warn!("{track_id}: decode error (dropped): {e}"),
+                Err(e) => {
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_warn) >= std::time::Duration::from_secs(1) {
+                        if suppressed > 0 {
+                            warn!("{track_id}: decode error (dropped, {suppressed} more suppressed in the last second): {e}");
+                        } else {
+                            warn!("{track_id}: decode error (dropped): {e}");
+                        }
+                        last_warn = now;
+                        suppressed = 0;
+                    } else {
+                        suppressed += 1;
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-use crate::protocol::WindowId;
+use crate::protocol::{WindowId, WindowKind};
 use std::collections::HashMap;
 
 /// A shared window's identity and geometry in host screen points (top-left origin).
@@ -31,9 +31,16 @@ pub fn window_local_to_screen(win: &WindowInfo, local_x: f64, local_y: f64) -> (
 }
 
 /// A `WindowOpened` announcement paired with its track binding key.
+///
+/// `info.x`/`info.y` are unused (0.0) here — the client's window manager owns
+/// mirror placement; `offset` (host points, relative to `parent_id`'s mirror)
+/// is what a Sheet/Transient mirror is actually positioned from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenedWindow {
     pub info: WindowInfo,
+    pub kind: WindowKind,
+    pub parent_id: Option<WindowId>,
+    pub offset: (f64, f64),
     pub track_id: String,
 }
 
@@ -94,7 +101,7 @@ mod tests {
     #[test]
     fn binder_announcement_then_track() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
-        let ann = OpenedWindow { info: win(1), track_id: "win-1".into() };
+        let ann = OpenedWindow { info: win(1), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-1".into() };
         assert!(b.on_announcement(ann.clone()).is_none());
         let out = b.on_track("win-1".into(), "track").unwrap();
         assert_eq!(out.0, ann);
@@ -105,7 +112,7 @@ mod tests {
     fn binder_track_then_announcement() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
         assert!(b.on_track("win-1".into(), "track").is_none());
-        let ann = OpenedWindow { info: win(1), track_id: "win-1".into() };
+        let ann = OpenedWindow { info: win(1), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-1".into() };
         let out = b.on_announcement(ann.clone()).unwrap();
         assert_eq!(out.0, ann);
         assert_eq!(out.1, "track");
@@ -115,14 +122,14 @@ mod tests {
     fn binder_unrelated_ids_do_not_pair() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
         assert!(b.on_track("win-1".into(), "track").is_none());
-        let ann = OpenedWindow { info: win(2), track_id: "win-2".into() };
+        let ann = OpenedWindow { info: win(2), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-2".into() };
         assert!(b.on_announcement(ann).is_none());
     }
 
     #[test]
     fn binder_pair_is_consumed() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
-        let ann = OpenedWindow { info: win(1), track_id: "win-1".into() };
+        let ann = OpenedWindow { info: win(1), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-1".into() };
         b.on_announcement(ann.clone());
         assert!(b.on_track("win-1".into(), "t1").is_some());
         // Second track with the same id has no pending announcement left.
