@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Shebbak">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232"></rect>
+    </clipPath>
+    <radialGradient id="cairoLight" cx="0.22" cy="0.08" r="0.85">
+      <stop offset="0" stop-color="#E8A33D" stop-opacity="0.16"></stop>
+      <stop offset="0.6" stop-color="#E8A33D" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+  <g clip-path="url(#squircle)">
+    <rect x="0" y="0" width="1024" height="1024" fill="#181B23"></rect>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#cairoLight)"></rect>
+    <rect x="230" y="230" width="564" height="564" rx="58" ry="58" fill="none" stroke="#E8A33D" stroke-width="44"></rect>
+    <rect x="208" y="490" width="608" height="44" fill="#E8A33D"></rect>
+    <rect x="490" y="208" width="44" height="608" fill="#E8A33D"></rect>
+    <circle cx="360" cy="360" r="28" fill="#C96F4D"></circle>
+    <circle cx="664" cy="360" r="28" fill="#C96F4D"></circle>
+    <circle cx="360" cy="664" r="28" fill="#C96F4D"></circle>
+    <circle cx="664" cy="664" r="28" fill="#C96F4D"></circle>
+    <circle cx="512" cy="512" r="46" fill="#181B23" stroke="#F2EFE9" stroke-width="20"></circle>
+  </g>
+  <rect x="0.5" y="0.5" width="1023" height="1023" rx="231.5" ry="231.5" fill="none" stroke="#E8A33D" stroke-opacity="0.16"></rect>
+</svg>

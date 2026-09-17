@@ -1,4 +1,12 @@
-# Shebbak (شباك)
+<p align="center">
+  <img src="assets/shebbak-icon.svg" width="120" alt="Shebbak icon">
+</p>
+
+<h1 align="center">Shebbak (شباك)</h1>
+
+<p align="center"><b>Share apps, not screens.</b></p>
+
+![Shebbak mirrors individual host windows as native client windows, one stream per window](assets/readme-hero.png)
 
 Sharing your whole screen never feels natural. The viewer gets one big rectangle with everything you have open, and remote-controlling it means living inside that rectangle.
 
