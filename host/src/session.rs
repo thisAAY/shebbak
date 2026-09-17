@@ -3,9 +3,12 @@ use srw_capture::macos::ax_watch::AxWatcher;
 use srw_capture::macos::list::PidSnapshotSource;
 use srw_capture::macos::stream::SckCapture;
 use srw_capture::WindowCapture;
-use srw_core::model::SnapshotWindow;
-use srw_core::protocol::{HostMessage, WindowId, WindowKind};
+use srw_core::model::{window_local_to_screen, SnapshotWindow};
+use srw_core::protocol::{ClientMessage, HostMessage, WindowId, WindowKind};
 use srw_core::tracker::{AppTracker, TrackerEvent, WindowSnapshotSource};
+use srw_input::macos::AxInput;
+use srw_input::macos_pid::PidInput;
+use srw_input::InputSink;
 use srw_transport::peer::HostPeer;
 use srw_transport::signalling::serve_one_offer;
 use std::collections::HashMap;
@@ -35,6 +38,17 @@ type RuntimeMap = HashMap<WindowId, WindowRuntime>;
 /// a PLI on any track can find its encoder without walking `RuntimeMap`
 /// (whose key is `WindowId`, not `track_id`).
 type PliPipelineMap = Arc<Mutex<HashMap<String, Arc<Pipeline>>>>;
+
+/// Work items for the single ordered input-delivery worker (M1 pattern,
+/// extended for v2): a dedicated thread drains these in arrival order so a
+/// client's FocusChange→KeyEvent (or mouse Down→Up) ordering is preserved —
+/// a spawn-per-message design cannot guarantee that, since spawned threads
+/// race for the input lock.
+enum InputWork {
+    Message(ClientMessage),
+    UpdatePids(HashMap<WindowId, i32>),
+    Shutdown,
+}
 
 /// Points -> even pixel dimension at the host's display scale. SCStream
 /// requires even width/height; `.max(2)` keeps a degenerate 0/1px window from
@@ -196,6 +210,88 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
     let tracker = Arc::new(Mutex::new(AppTracker::new(pids)));
     let mut source = PidSnapshotSource { pids: pids.iter().copied().collect() };
 
+    // Input routing (Task 16). Default comes from the Task-1 spike verdict
+    // in docs/m2-input-spike-results.md (`activate`): AxInput
+    // (activate-then-post) is the default sink; SRW_INPUT=pid opts into the
+    // pid-targeted path, which the spike found unreliable for clicks and
+    // menu tracking but is kept available for testing.
+    let sink: Box<dyn InputSink> = match std::env::var("SRW_INPUT").as_deref() {
+        Ok("pid") => {
+            info!("input: pid-targeted (PidInput)");
+            Box::new(PidInput::new(HashMap::new()))
+        }
+        _ => {
+            info!("input: activate-then-post (AxInput)");
+            Box::new(AxInput::new(HashMap::new()))
+        }
+    };
+    let input = Arc::new(Mutex::new(sink));
+
+    // Ordered input worker (M1 pattern, extended for v2): a single thread
+    // drains `input_rx` in arrival order, so the client's
+    // FocusChange→KeyEvent (and mouse Down→Up) ordering is preserved end to
+    // end — a spawn-per-message design cannot guarantee that.
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<InputWork>();
+    let input_worker = {
+        let tracker = tracker.clone();
+        let input = input.clone();
+        std::thread::Builder::new().name("input-worker".into()).spawn(move || {
+            for work in input_rx {
+                match work {
+                    InputWork::UpdatePids(map) => input.lock().unwrap().set_pid_map(map),
+                    InputWork::Message(msg) => {
+                        let mut sink = input.lock().unwrap();
+                        let r = match msg {
+                            ClientMessage::MouseInput { window_id, x, y, button, action } => {
+                                match tracker.lock().unwrap().geometry(window_id).cloned() {
+                                    Some(win) => {
+                                        let (sx, sy) = window_local_to_screen(&win, x, y);
+                                        sink.mouse(window_id, sx, sy, button, action)
+                                    }
+                                    None => {
+                                        warn!("input for unknown window {window_id}");
+                                        Ok(())
+                                    }
+                                }
+                            }
+                            ClientMessage::MouseMove { window_id, x, y } => {
+                                match tracker.lock().unwrap().geometry(window_id).cloned() {
+                                    Some(win) => {
+                                        let (sx, sy) = window_local_to_screen(&win, x, y);
+                                        sink.mouse_move(window_id, sx, sy)
+                                    }
+                                    None => Ok(()),
+                                }
+                            }
+                            ClientMessage::KeyEvent { window_id, key_code, down, flags } => {
+                                sink.key(window_id, key_code, down, flags)
+                            }
+                            ClientMessage::FocusChange { window_id } => sink.focus(window_id),
+                            ClientMessage::ResizeRequest { window_id, width, height } => {
+                                sink.resize_window(window_id, width, height)
+                            }
+                            ClientMessage::CloseRequest { window_id } => sink.close_window(window_id),
+                            // Consumed inside HostPeer's dispatch — never reaches here.
+                            ClientMessage::SdpAnswer { .. } => Ok(()),
+                        };
+                        if let Err(e) = r {
+                            warn!("input delivery failed: {e:#}");
+                        }
+                    }
+                    InputWork::Shutdown => break,
+                }
+            }
+            info!("input worker exiting");
+        })?
+    };
+    {
+        // Client → host messages: non-blocking hand-off to the ordered worker.
+        let input_tx = input_tx.clone();
+        peer.on_client_message(move |msg| {
+            let _ = input_tx.send(InputWork::Message(msg));
+        });
+    }
+
     // PLI → request_idr, via a track_id-keyed pipeline index shared with the reconciler.
     let pli_pipelines: PliPipelineMap = Arc::new(Mutex::new(HashMap::new()));
     {
@@ -270,14 +366,25 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
         &disconnected,
         &mut runtimes,
         &pli_pipelines,
+        &input_tx,
     )
     .await;
 
     // Unconditional teardown (M1 Finding 2 discipline): whatever happened
-    // above, stop every capture/pipeline that got started, then the watcher,
-    // then the peer — in that order, regardless of Ok/Err.
+    // above, stop every capture/pipeline that got started, then the input
+    // worker, then the watcher, then the peer — in that order, regardless of
+    // Ok/Err.
     for (_, rt) in runtimes.drain() {
         teardown_runtime(rt);
+    }
+    let _ = input_tx.send(InputWork::Shutdown);
+    // Join on a blocking thread: `JoinHandle::join` blocks the calling
+    // thread, and this is a tokio task — blocking it directly would stall
+    // the runtime worker until the input thread exits.
+    match tokio::task::spawn_blocking(move || input_worker.join()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("input worker panicked: {e:?}"),
+        Err(e) => warn!("input worker join task panicked: {e:?}"),
     }
     watcher.stop();
     peer.close().await;
@@ -299,6 +406,7 @@ async fn run_session_body(
     disconnected: &Arc<AtomicBool>,
     runtimes: &mut RuntimeMap,
     pli_pipelines: &PliPipelineMap,
+    input_tx: &std::sync::mpsc::Sender<InputWork>,
 ) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
     let mut interval = tokio::time::interval(Duration::from_millis(RECONCILE_MS));
@@ -420,7 +528,11 @@ async fn run_session_body(
                 warn!("renegotiation failed: {e:#}");
             }
         }
-        // Task 16 adds: input pid-map refresh here.
+        // Refresh the input sink's window→pid map after every non-empty
+        // diff, so newly opened/closed windows are immediately targetable
+        // (AxInput's AX lookup and PidInput's pid-targeted post both key off
+        // this map).
+        let _ = input_tx.send(InputWork::UpdatePids(tracker.lock().unwrap().pid_map()));
     }
 
     error!("peer disconnected; tearing down session");
