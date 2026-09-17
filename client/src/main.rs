@@ -29,7 +29,9 @@ fn main() -> Result<()> {
     };
     let mut app = app::App::new(net, ui_rx);
     event_loop.run_app(&mut app)?;
-    // run_app returned: either disconnect-exit or all windows closed by user.
+    // run_app returned. Zero mirrors is a valid idle state (app sharing can
+    // revive it), so the only exit paths are UiEvent::Disconnected (handled
+    // below) and Cmd+Q, which Task 19 wires up.
     if app.disconnected() {
         std::process::exit(1);
     }

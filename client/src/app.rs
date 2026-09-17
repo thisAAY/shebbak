@@ -346,14 +346,20 @@ impl ApplicationHandler for App {
                 send_client_msg(&self.net, msg);
             }
             WindowEvent::Resized(size) => {
-                if let Some(m) = self.mirrors.get(&wid) {
+                if let Some(m) = self.mirrors.get_mut(&wid) {
                     if m.kind == WindowKind::Normal {
                         let scale = m.window.scale_factor();
                         let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
                         // Echo guard: host-initiated resizes come back through
                         // `last_host_size`, so only a genuine client-side
-                        // drag-resize should round-trip back to the host.
+                        // drag-resize should round-trip back to the host. Once
+                        // we send, fold the just-sent size into the same guard
+                        // — otherwise every intermediate frame of a live drag
+                        // re-clears it and floods the host with a
+                        // ResizeRequest per frame (and the host's own echo of
+                        // this resize would otherwise pass the guard too).
                         if (w - m.last_host_size.0).abs() >= 1.0 || (h - m.last_host_size.1).abs() >= 1.0 {
+                            m.last_host_size = (w, h);
                             send_client_msg(
                                 &self.net,
                                 ClientMessage::ResizeRequest { window_id: m.remote_id, width: w, height: h },
