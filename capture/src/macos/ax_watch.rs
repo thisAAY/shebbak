@@ -99,6 +99,13 @@ impl AxWatcher {
     }
 
     /// Stops the run loop and joins the thread.
+    ///
+    /// `CFRunLoopStop` only stops a run loop that is currently running. There is a
+    /// narrow window between `spawn()` sending the `RunLoopHandle` back and the
+    /// watcher thread actually entering `CFRunLoopRun`; calling `stop()` inside that
+    /// window is a no-op, and the `join()` below will then block forever. Do not
+    /// call `stop()` synchronously right after `spawn()` returns — only at session
+    /// teardown, once the watcher has had a chance to actually start running.
     pub fn stop(self) {
         self.runloop.0.stop();
         let _ = self.thread.join();
