@@ -15,15 +15,29 @@ pub fn chunk_blit(window_id: WindowId, seq: u32, png: &[u8]) -> Vec<HostMessage>
 
 struct Partial { seq: u32, chunk_count: u16, received: HashMap<u16, Vec<u8>> }
 
-pub struct BlitAssembler { partials: HashMap<WindowId, Partial> }
+pub struct BlitAssembler {
+    partials: HashMap<WindowId, Partial>,
+    last_completed_seq: HashMap<WindowId, u32>,
+}
 
 impl BlitAssembler {
-    pub fn new() -> Self { Self { partials: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            partials: HashMap::new(),
+            last_completed_seq: HashMap::new(),
+        }
+    }
 
     pub fn push(&mut self, msg: &HostMessage) -> Option<(WindowId, Vec<u8>)> {
         let HostMessage::TransientBlit { window_id, seq, chunk_index, chunk_count, data_b64 } = msg else {
             return None;
         };
+        // Reject stale seq that has already completed
+        if let Some(&completed_seq) = self.last_completed_seq.get(window_id) {
+            if *seq <= completed_seq {
+                return None;
+            }
+        }
         let data = base64::engine::general_purpose::STANDARD.decode(data_b64).ok()?;
         let entry = self.partials.entry(*window_id).or_insert_with(|| Partial {
             seq: *seq, chunk_count: *chunk_count, received: HashMap::new(),
@@ -37,6 +51,7 @@ impl BlitAssembler {
             let count = entry.chunk_count;
             let mut out = Vec::new();
             for i in 0..count { out.extend_from_slice(&entry.received[&i]); }
+            self.last_completed_seq.insert(*window_id, *seq);
             self.partials.remove(window_id);
             Some((*window_id, out))
         } else { None }
@@ -88,5 +103,26 @@ mod tests {
     fn non_blit_messages_are_ignored() {
         let mut asm = BlitAssembler::new();
         assert_eq!(asm.push(&HostMessage::WindowClosed { window_id: 1 }), None);
+    }
+
+    #[test]
+    fn completed_seq_never_reassembles_from_stale_duplicate() {
+        // Complete seq 1 at window 9
+        let payload1 = vec![1u8; 100];
+        let msgs1 = chunk_blit(9, 1, &payload1);
+        let mut asm = BlitAssembler::new();
+        let result1 = asm.push(&msgs1[0]);
+        assert_eq!(result1, Some((9, payload1.clone())));
+
+        // Stale duplicate of seq 1 arrives after seq 1 was evicted
+        let stale_dup = &msgs1[0];
+        let result_stale = asm.push(stale_dup);
+        assert_eq!(result_stale, None, "stale duplicate must not reassemble");
+
+        // Newer seq 2 should still work
+        let payload2 = vec![2u8; 100];
+        let msgs2 = chunk_blit(9, 2, &payload2);
+        let result2 = asm.push(&msgs2[0]);
+        assert_eq!(result2, Some((9, payload2)), "newer seq must still work");
     }
 }
