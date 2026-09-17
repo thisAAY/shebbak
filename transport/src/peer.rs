@@ -20,6 +20,10 @@ use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_remote::TrackRemote;
 
+/// Shared slot for an optional message-handler callback, set once via
+/// `on_message`/`on_pli` and invoked from the data-channel/RTCP callbacks.
+type HandlerSlot<M> = Arc<Mutex<Option<Arc<dyn Fn(M) + Send + Sync>>>>;
+
 async fn new_pc() -> Result<Arc<RTCPeerConnection>> {
     let mut media = MediaEngine::default();
     media.register_default_codecs()?;
@@ -150,19 +154,18 @@ impl PendingAnswerQueue {
 pub struct HostPeer {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
-    on_msg: Arc<Mutex<Option<Arc<dyn Fn(ClientMessage) + Send + Sync>>>>,
+    on_msg: HandlerSlot<ClientMessage>,
     senders: Arc<Mutex<HashMap<String, Arc<RTCRtpSender>>>>,
     pending_answers: Arc<PendingAnswerQueue>,
     renegotiation_lock: Arc<tokio::sync::Mutex<()>>,
-    on_pli: Arc<Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>>,
+    on_pli: HandlerSlot<String>,
 }
 
 impl HostPeer {
     pub async fn new() -> Result<Self> {
         let pc = new_pc().await?;
         let dc: Arc<Mutex<Option<Arc<RTCDataChannel>>>> = Arc::new(Mutex::new(None));
-        let on_msg: Arc<Mutex<Option<Arc<dyn Fn(ClientMessage) + Send + Sync>>>> =
-            Arc::new(Mutex::new(None));
+        let on_msg: HandlerSlot<ClientMessage> = Arc::new(Mutex::new(None));
         let pending_answers = Arc::new(PendingAnswerQueue::new());
 
         let dc_slot = dc.clone();
@@ -335,15 +338,14 @@ impl HostPeer {
 pub struct ClientPeer {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<RTCDataChannel>,
-    on_msg: Arc<Mutex<Option<Arc<dyn Fn(HostMessage) + Send + Sync>>>>,
+    on_msg: HandlerSlot<HostMessage>,
 }
 
 impl ClientPeer {
     pub async fn new() -> Result<Self> {
         let pc = new_pc().await?;
         let dc = pc.create_data_channel("control", None).await?;
-        let on_msg: Arc<Mutex<Option<Arc<dyn Fn(HostMessage) + Send + Sync>>>> =
-            Arc::new(Mutex::new(None));
+        let on_msg: HandlerSlot<HostMessage> = Arc::new(Mutex::new(None));
 
         let pc_handler = pc.clone();
         let dc_handler = dc.clone();

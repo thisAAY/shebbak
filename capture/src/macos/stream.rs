@@ -86,7 +86,7 @@ pub struct SckCapture {
 impl SckCapture {
     pub fn new(window_id: u32, width_px: u32, height_px: u32, fps: u32) -> Result<Self> {
         anyhow::ensure!(
-            width_px % 2 == 0 && height_px % 2 == 0,
+            width_px.is_multiple_of(2) && height_px.is_multiple_of(2),
             "capture size must be even, got {width_px}x{height_px}"
         );
         ensure_core_graphics_initialized();
@@ -124,7 +124,7 @@ impl WindowCapture for SckCapture {
 
     fn reconfigure(&mut self, width_px: u32, height_px: u32) -> Result<()> {
         anyhow::ensure!(
-            width_px % 2 == 0 && height_px % 2 == 0,
+            width_px.is_multiple_of(2) && height_px.is_multiple_of(2),
             "capture size must be even, got {width_px}x{height_px}"
         );
         anyhow::ensure!(width_px > 0 && height_px > 0, "capture size must be nonzero");

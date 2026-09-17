@@ -92,12 +92,15 @@ impl AppTracker {
             }
             // Resized: only while not minimized, not for Transient, and not immediately after restore
             // (restore already handled catch-up Resized)
-            if t.kind != WindowKind::Transient && !t.minimized && !w.minimized && !just_restored {
-                if (w.info.width, w.info.height) != (t.info.width, t.info.height) {
-                    events.push(TrackerEvent::Resized {
-                        window_id: w.info.id, width: w.info.width, height: w.info.height,
-                    });
-                }
+            if t.kind != WindowKind::Transient
+                && !t.minimized
+                && !w.minimized
+                && !just_restored
+                && (w.info.width, w.info.height) != (t.info.width, t.info.height)
+            {
+                events.push(TrackerEvent::Resized {
+                    window_id: w.info.id, width: w.info.width, height: w.info.height,
+                });
             }
             // TitleChanged: fires regardless of minimized state or kind
             if w.info.title != t.info.title {

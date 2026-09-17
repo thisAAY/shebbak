@@ -52,12 +52,12 @@ impl H264Encoder {
         // bgra_to_i420 asserts even dimensions; validate here so odd-sized
         // frames (e.g. from window capture) surface as an error, not a panic.
         ensure!(
-            frame.width % 2 == 0 && frame.height % 2 == 0,
+            frame.width.is_multiple_of(2) && frame.height.is_multiple_of(2),
             "encode_bgra requires even dimensions, got {}x{}",
             frame.width,
             frame.height
         );
-        if self.frame_count % IDR_INTERVAL_FRAMES == 0 {
+        if self.frame_count.is_multiple_of(IDR_INTERVAL_FRAMES) {
             self.inner.force_intra_frame();
         }
         self.frame_count += 1;

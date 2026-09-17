@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
         let mut has_partial_alpha = false;
         let mut min_alpha = 255u8;
         let mut max_alpha = 0u8;
-        for px in img.data.chunks_exact(4) {
+        for px in img.data.as_chunks::<4>().0 {
             let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
             if r == 0 && g == 0 && b == 0 {
                 has_black_pixel = true;

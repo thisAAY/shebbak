@@ -30,7 +30,7 @@ pub fn snapshot_window_rgba(window_id: u32) -> Result<RgbaImage> {
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height as usize {
         let line = &src[row * bpr..row * bpr + width as usize * 4];
-        for px in line.chunks_exact(4) {
+        for px in line.as_chunks::<4>().0 {
             let (b, g, r, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3]);
             // Un-premultiply so PNG alpha composites correctly on the client.
             let (r, g, b) = if a == 0 || a == 255 {
@@ -42,7 +42,7 @@ pub fn snapshot_window_rgba(window_id: u32) -> Result<RgbaImage> {
                     ((b * 255) / a as u32).min(255) as u8,
                 )
             };
-            out.extend_from_slice(&[r, g, b, a as u8]);
+            out.extend_from_slice(&[r, g, b, a]);
         }
     }
     Ok(RgbaImage { width, height, data: out })

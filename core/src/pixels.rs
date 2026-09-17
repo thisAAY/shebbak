@@ -119,7 +119,7 @@ fn clamp_u8(v: i32) -> u8 {
 pub fn bgra_to_i420(frame: &BgraFrame) -> I420Frame {
     let w = frame.width as usize;
     let h = frame.height as usize;
-    assert!(w % 2 == 0 && h % 2 == 0, "bgra_to_i420 requires even dimensions, got {}x{}", w, h);
+    assert!(w.is_multiple_of(2) && h.is_multiple_of(2), "bgra_to_i420 requires even dimensions, got {}x{}", w, h);
     assert_eq!(frame.data.len(), w * h * 4);
 
     let mut y_plane = vec![0u8; w * h];
@@ -156,6 +156,7 @@ pub fn bgra_to_i420(frame: &BgraFrame) -> I420Frame {
 }
 
 /// BT.601 limited-range I420 → BGRA, honoring source plane strides.
+#[allow(clippy::too_many_arguments)] // plane geometry (dims + 3 planes + 3 strides) doesn't factor cleanly into fewer params
 pub fn i420_to_bgra(
     width: u32,
     height: u32,

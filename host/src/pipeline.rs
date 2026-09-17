@@ -91,7 +91,7 @@ impl Pipeline {
                                 warn!("{label}: write_sample: {e}");
                             } else {
                                 sent += 1;
-                                if sent % 300 == 0 {
+                                if sent.is_multiple_of(300) {
                                     info!("{label}: {sent} samples sent");
                                 }
                             }

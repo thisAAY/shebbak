@@ -24,9 +24,9 @@ const SIGNAL_PORT: u16 = 9009;
 const RECONCILE_MS: u64 = 500;
 
 /// Per-window runtime state. `Track` windows (Normal/Sheet) get a media track
-/// + encoder pipeline + capture; `Transient` windows are announced but their
-/// pixels ride the control channel as blits, driven by the loop `blit`
-/// started in the `Opened` arm (`stop` is that loop's shutdown flag).
+/// plus encoder pipeline and capture; `Transient` windows are announced but
+/// their pixels ride the control channel as blits, driven by the loop
+/// `blit` started in the `Opened` arm (`stop` is that loop's shutdown flag).
 enum WindowRuntime {
     Track { pipeline: Arc<Pipeline>, capture: Option<Box<dyn WindowCapture>>, track_id: String },
     Blit { stop: Option<Arc<AtomicBool>> },
