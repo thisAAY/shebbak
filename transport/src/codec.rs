@@ -25,13 +25,21 @@ impl YUVSource for I420Source<'_> {
     }
 }
 
+/// How often (in encoded frames) to force a fresh IDR, independent of
+/// openh264's default of one IDR per session. Without this, a decoder that
+/// loses reference state to packet loss never recovers: every subsequent
+/// access unit fails to decode for the rest of the session. 90 frames is 3s
+/// at 30fps, bounding recovery time after loss.
+const IDR_INTERVAL_FRAMES: u64 = 90;
+
 pub struct H264Encoder {
     inner: Encoder,
+    frame_count: u64,
 }
 
 impl H264Encoder {
     pub fn new() -> Result<Self> {
-        Ok(Self { inner: Encoder::new().context("create openh264 encoder")? })
+        Ok(Self { inner: Encoder::new().context("create openh264 encoder")?, frame_count: 0 })
     }
 
     /// Encode one BGRA frame to an Annex-B access unit.
@@ -44,6 +52,10 @@ impl H264Encoder {
             frame.width,
             frame.height
         );
+        if self.frame_count % IDR_INTERVAL_FRAMES == 0 {
+            self.inner.force_intra_frame();
+        }
+        self.frame_count += 1;
         let i420 = bgra_to_i420(frame);
         let bitstream = self.inner.encode(&I420Source(&i420)).context("encode frame")?;
         let bytes = bitstream.to_vec();
@@ -137,5 +149,59 @@ mod tests {
         let frame = solid(63, 64, 10, 20, 30);
         let result = enc.encode_bgra(&frame);
         assert!(result.is_err(), "expected Err for odd-width frame, got {:?}", result.is_ok());
+    }
+
+    /// Returns true if the Annex-B access unit contains an IDR slice NAL unit
+    /// (nal_unit_type == 5), scanning past both 3- and 4-byte start codes.
+    fn au_contains_idr(au: &[u8]) -> bool {
+        let mut i = 0;
+        while i + 3 <= au.len() {
+            let start_len = if au[i..].starts_with(&[0, 0, 0, 1]) {
+                Some(4)
+            } else if au[i..].starts_with(&[0, 0, 1]) {
+                Some(3)
+            } else {
+                None
+            };
+            if let Some(len) = start_len {
+                let nal_byte_idx = i + len;
+                if nal_byte_idx < au.len() {
+                    let nal_type = au[nal_byte_idx] & 0x1F;
+                    if nal_type == 5 {
+                        return true;
+                    }
+                }
+                i += len;
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn encoder_emits_periodic_idr_for_loss_recovery() {
+        // A decoder that loses reference state to packet loss can only recover
+        // once a fresh IDR arrives. openh264's default config emits exactly one
+        // IDR per session (at start), so a decoder that misses it is stuck
+        // forever. Assert the encoder emits more than one IDR across a run
+        // long enough to span the periodic interval.
+        let mut enc = H264Encoder::new().unwrap();
+        let frame = solid(64, 64, 20, 180, 240);
+
+        let mut idr_aus = 0;
+        for _ in 0..200 {
+            if let Some(au) = enc.encode_bgra(&frame).unwrap() {
+                if au_contains_idr(&au) {
+                    idr_aus += 1;
+                }
+            }
+        }
+
+        assert!(
+            idr_aus >= 2,
+            "expected at least 2 access units containing an IDR (initial + periodic), got {}",
+            idr_aus
+        );
     }
 }
