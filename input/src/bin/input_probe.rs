@@ -2,6 +2,8 @@
 fn main() -> anyhow::Result<()> {
     // usage: input_probe <cgid> <pid> click <local_x> <local_y> <win_x> <win_y>
     //        input_probe <cgid> <pid> close
+    //        input_probe <cgid> <pid> resize <w> <h>
+    //        input_probe <cgid> <pid> key <code>
     use srw_core::protocol::{MouseAction, MouseButton};
     use srw_input::macos::AxInput;
     use srw_input::InputSink;
@@ -29,8 +31,24 @@ fn main() -> anyhow::Result<()> {
             println!("pressing close button");
             sink.close_window(cgid)?;
         }
+        "resize" => {
+            let w: f64 = args[4].parse()?;
+            let h: f64 = args[5].parse()?;
+            println!("resizing to ({w}, {h})");
+            sink.resize_window(cgid, w, h)?;
+        }
+        "key" => {
+            let code: u16 = args[4].parse()?;
+            println!("focusing then posting key {code}");
+            sink.focus(cgid)?;
+            sink.key(cgid, code, true, 0)?;
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            sink.key(cgid, code, false, 0)?;
+        }
         _ => {
-            eprintln!("usage: input_probe <cgid> <pid> click <lx> <ly> <win_x> <win_y> | close");
+            eprintln!(
+                "usage: input_probe <cgid> <pid> click <lx> <ly> <win_x> <win_y> | close | resize <w> <h> | key <code>"
+            );
             std::process::exit(2);
         }
     }
