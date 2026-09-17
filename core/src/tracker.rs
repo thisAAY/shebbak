@@ -74,12 +74,14 @@ impl AppTracker {
         // Updates.
         for w in &ours {
             let Some(t) = self.live.get_mut(&w.info.id) else { continue; };
+            let mut just_restored = false;
             if w.minimized != t.minimized {
                 t.minimized = w.minimized;
                 if w.minimized {
                     events.push(TrackerEvent::Minimized { window_id: w.info.id });
                 } else {
                     events.push(TrackerEvent::Restored { window_id: w.info.id });
+                    just_restored = true;
                     // Emit catch-up Resized if size changed while minimized
                     if (w.info.width, w.info.height) != t.last_unminimized_size && t.kind != WindowKind::Transient {
                         events.push(TrackerEvent::Resized {
@@ -88,8 +90,9 @@ impl AppTracker {
                     }
                 }
             }
-            // Resized: only while not minimized, not for Transient
-            if t.kind != WindowKind::Transient && !t.minimized && !w.minimized {
+            // Resized: only while not minimized, not for Transient, and not immediately after restore
+            // (restore already handled catch-up Resized)
+            if t.kind != WindowKind::Transient && !t.minimized && !w.minimized && !just_restored {
                 if (w.info.width, w.info.height) != (t.info.width, t.info.height) {
                     events.push(TrackerEvent::Resized {
                         window_id: w.info.id, width: w.info.width, height: w.info.height,
@@ -279,5 +282,20 @@ mod tests {
         let ev = t.diff(vec![menu_renamed, normal(1, 100)]);
         assert!(ev.contains(&TrackerEvent::TitleChanged { window_id: 2, title: "menu renamed".into() }),
                 "TitleChanged must fire for transients, got {:?}", ev);
+    }
+
+    #[test]
+    fn no_duplicate_resized_when_restore_and_resize_coincide() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        // Minimize
+        let mut min = normal(1, 100); min.minimized = true; min.on_screen = false;
+        t.diff(vec![min.clone()]);
+        // In ONE diff call: restore with size change
+        let restored_resized = snap(1, 100, 0, AxRole::Window, 10.0, 20.0, 900.0, 700.0, "win", false);
+        let ev = t.diff(vec![restored_resized]);
+        assert_eq!(ev.len(), 2, "expect exactly [Restored, Resized], got {:?}", ev);
+        assert_eq!(ev[0], TrackerEvent::Restored { window_id: 1 });
+        assert_eq!(ev[1], TrackerEvent::Resized { window_id: 1, width: 900.0, height: 700.0 });
     }
 }
