@@ -28,9 +28,9 @@ impl YUVSource for I420Source<'_> {
 /// How often (in encoded frames) to force a fresh IDR, independent of
 /// openh264's default of one IDR per session. Without this, a decoder that
 /// loses reference state to packet loss never recovers: every subsequent
-/// access unit fails to decode for the rest of the session. 90 frames is 3s
-/// at 30fps, bounding recovery time after loss.
-const IDR_INTERVAL_FRAMES: u64 = 90;
+/// access unit fails to decode for the rest of the session. ~10 s at 30fps
+/// backstop; PLI-triggered IDR is the primary recovery path as of M2.
+const IDR_INTERVAL_FRAMES: u64 = 300;
 
 pub struct H264Encoder {
     inner: Encoder,
@@ -40,6 +40,11 @@ pub struct H264Encoder {
 impl H264Encoder {
     pub fn new() -> Result<Self> {
         Ok(Self { inner: Encoder::new().context("create openh264 encoder")?, frame_count: 0 })
+    }
+
+    /// Force the next encoded frame to be an IDR (PLI response path).
+    pub fn force_idr(&mut self) {
+        self.inner.force_intra_frame();
     }
 
     /// Encode one BGRA frame to an Annex-B access unit.
@@ -180,6 +185,17 @@ mod tests {
     }
 
     #[test]
+    fn force_idr_emits_idr_on_next_frame() {
+        let mut enc = H264Encoder::new().unwrap();
+        let frame = solid(64, 64, 20, 180, 240);
+        // Warm past the initial IDR.
+        for _ in 0..5 { enc.encode_bgra(&frame).unwrap(); }
+        enc.force_idr();
+        let au = enc.encode_bgra(&frame).unwrap().expect("au after force_idr");
+        assert!(au_contains_idr(&au), "frame after force_idr() must contain an IDR NAL");
+    }
+
+    #[test]
     fn encoder_emits_periodic_idr_for_loss_recovery() {
         // A decoder that loses reference state to packet loss can only recover
         // once a fresh IDR arrives. openh264's default config emits exactly one
@@ -190,7 +206,7 @@ mod tests {
         let frame = solid(64, 64, 20, 180, 240);
 
         let mut idr_aus = 0;
-        for _ in 0..200 {
+        for _ in 0..400 {
             if let Some(au) = enc.encode_bgra(&frame).unwrap() {
                 if au_contains_idr(&au) {
                     idr_aus += 1;
