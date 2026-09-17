@@ -3,8 +3,11 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 /// One-shot signalling server: blocks until a single POST /offer arrives.
 /// Returns the parsed offer and a responder to complete the HTTP exchange.
+///
+/// Binds `0.0.0.0` (all interfaces), not just loopback: M2 sharing happens
+/// over LAN, so a client on another machine must be able to reach this port.
 pub fn serve_one_offer(port: u16) -> Result<(RTCSessionDescription, OfferResponder)> {
-    let server = tiny_http::Server::http(("127.0.0.1", port))
+    let server = tiny_http::Server::http(("0.0.0.0", port))
         .map_err(|e| anyhow!("bind signalling port {port}: {e}"))?;
     loop {
         let mut request = server.recv().context("accept signalling request")?;

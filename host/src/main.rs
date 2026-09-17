@@ -2,7 +2,7 @@ mod pipeline;
 mod session;
 
 use anyhow::Result;
-use srw_capture::macos::list::{list_windows, WindowListEntry};
+use srw_capture::macos::list::list_apps;
 use srw_capture::macos::permissions;
 use std::io::Write;
 use tracing::info;
@@ -26,25 +26,26 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // List and pick two windows.
-    let windows = list_windows()?;
-    println!("{:<4} {:<8} {:<24} {:<40}", "idx", "cgid", "app", "title");
-    for (i, w) in windows.iter().enumerate() {
-        println!("{:<4} {:<8} {:<24} {:<40}", i, w.info.id, w.app_name, w.info.title);
+    // List apps and pick one or more to share, by pid.
+    let apps = list_apps()?;
+    println!("{:<4} {:<8} {:<24} windows", "idx", "pid", "app");
+    for (i, a) in apps.iter().enumerate() {
+        println!("{:<4} {:<8} {:<24} {}", i, a.pid, a.app_name, a.window_titles.join(" | "));
     }
-    let pick = |prompt: &str| -> Result<usize> {
-        print!("{prompt}");
-        std::io::stdout().flush()?;
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        let idx: usize = line.trim().parse()?;
-        anyhow::ensure!(idx < windows.len(), "index out of range");
-        Ok(idx)
-    };
-    let a = pick("first window index: ")?;
-    let b = pick("second window index: ")?;
-    anyhow::ensure!(a != b, "pick two different windows");
-    let chosen: [WindowListEntry; 2] = [windows[a].clone(), windows[b].clone()];
+    print!("app indices to share (comma-separated): ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let pids: Vec<i32> = line
+        .trim()
+        .split(',')
+        .map(|s| -> Result<i32> {
+            let idx: usize = s.trim().parse()?;
+            anyhow::ensure!(idx < apps.len(), "index {idx} out of range");
+            Ok(apps[idx].pid)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(!pids.is_empty(), "pick at least one app");
 
     // Host display scale for capture pixel size. M1: assume the main display's
     // scale; 2.0 on retina Macs. Read it from CGDisplay.
@@ -53,7 +54,7 @@ async fn main() -> Result<()> {
 
     // Session loop: serve one client at a time; on disconnect, wait for the next.
     loop {
-        if let Err(e) = session::run_session(&chosen, scale).await {
+        if let Err(e) = session::run_session(&pids, scale).await {
             eprintln!("session ended: {e:#}");
         }
         println!("waiting for next client...");
