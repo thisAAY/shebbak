@@ -13,7 +13,11 @@ pub struct WindowInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AxRole { Window, Sheet, Unknown }
+pub enum AxRole {
+    Window,
+    Sheet,
+    Unknown,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotWindow {
@@ -53,7 +57,10 @@ pub struct TrackBinder<T> {
 
 impl<T> TrackBinder<T> {
     pub fn new() -> Self {
-        Self { announcements: HashMap::new(), tracks: HashMap::new() }
+        Self {
+            announcements: HashMap::new(),
+            tracks: HashMap::new(),
+        }
     }
 
     pub fn on_announcement(&mut self, a: OpenedWindow) -> Option<(OpenedWindow, T)> {
@@ -88,7 +95,14 @@ mod tests {
     use super::*;
 
     fn win(id: u32) -> WindowInfo {
-        WindowInfo { id, title: "t".into(), x: 100.0, y: 50.0, width: 800.0, height: 600.0 }
+        WindowInfo {
+            id,
+            title: "t".into(),
+            x: 100.0,
+            y: 50.0,
+            width: 800.0,
+            height: 600.0,
+        }
     }
 
     #[test]
@@ -101,7 +115,13 @@ mod tests {
     #[test]
     fn binder_announcement_then_track() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
-        let ann = OpenedWindow { info: win(1), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-1".into() };
+        let ann = OpenedWindow {
+            info: win(1),
+            kind: WindowKind::Normal,
+            parent_id: None,
+            offset: (0.0, 0.0),
+            track_id: "win-1".into(),
+        };
         assert!(b.on_announcement(ann.clone()).is_none());
         let out = b.on_track("win-1".into(), "track").unwrap();
         assert_eq!(out.0, ann);
@@ -112,7 +132,13 @@ mod tests {
     fn binder_track_then_announcement() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
         assert!(b.on_track("win-1".into(), "track").is_none());
-        let ann = OpenedWindow { info: win(1), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-1".into() };
+        let ann = OpenedWindow {
+            info: win(1),
+            kind: WindowKind::Normal,
+            parent_id: None,
+            offset: (0.0, 0.0),
+            track_id: "win-1".into(),
+        };
         let out = b.on_announcement(ann.clone()).unwrap();
         assert_eq!(out.0, ann);
         assert_eq!(out.1, "track");
@@ -122,14 +148,26 @@ mod tests {
     fn binder_unrelated_ids_do_not_pair() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
         assert!(b.on_track("win-1".into(), "track").is_none());
-        let ann = OpenedWindow { info: win(2), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-2".into() };
+        let ann = OpenedWindow {
+            info: win(2),
+            kind: WindowKind::Normal,
+            parent_id: None,
+            offset: (0.0, 0.0),
+            track_id: "win-2".into(),
+        };
         assert!(b.on_announcement(ann).is_none());
     }
 
     #[test]
     fn binder_pair_is_consumed() {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
-        let ann = OpenedWindow { info: win(1), kind: WindowKind::Normal, parent_id: None, offset: (0.0, 0.0), track_id: "win-1".into() };
+        let ann = OpenedWindow {
+            info: win(1),
+            kind: WindowKind::Normal,
+            parent_id: None,
+            offset: (0.0, 0.0),
+            track_id: "win-1".into(),
+        };
         b.on_announcement(ann.clone());
         assert!(b.on_track("win-1".into(), "t1").is_some());
         // Second track with the same id has no pending announcement left.

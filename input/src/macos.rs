@@ -1,17 +1,15 @@
-use anyhow::{anyhow, bail, Result};
 use accessibility_sys::{
     kAXCloseButtonAttribute, kAXErrorSuccess, kAXFrontmostAttribute, kAXPressAction,
     kAXRaiseAction, kAXSizeAttribute, kAXValueTypeCGSize, kAXWindowsAttribute, AXError,
     AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementPerformAction,
     AXUIElementRef, AXUIElementSetAttributeValue, AXValueCreate,
 };
+use anyhow::{anyhow, bail, Result};
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFRelease, CFRetain, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::string::CFString;
-use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton,
-};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use srw_core::protocol::{MouseAction, MouseButton, WindowId};
@@ -104,7 +102,10 @@ pub(crate) fn ax_resize_window(
     unsafe {
         let (app, win) = ax_window(pids, window_id)?;
         let size = core_graphics::geometry::CGSize::new(width, height);
-        let value = AXValueCreate(kAXValueTypeCGSize, &size as *const _ as *const std::ffi::c_void);
+        let value = AXValueCreate(
+            kAXValueTypeCGSize,
+            &size as *const _ as *const std::ffi::c_void,
+        );
         let err = AXUIElementSetAttributeValue(
             win,
             CFString::from_static_string(kAXSizeAttribute).as_concrete_TypeRef(),
@@ -175,9 +176,7 @@ impl InputSink for AxInput {
             (MouseButton::Left, MouseAction::Down) => {
                 (CGEventType::LeftMouseDown, CGMouseButton::Left)
             }
-            (MouseButton::Left, MouseAction::Up) => {
-                (CGEventType::LeftMouseUp, CGMouseButton::Left)
-            }
+            (MouseButton::Left, MouseAction::Up) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
             (MouseButton::Right, MouseAction::Down) => {
                 (CGEventType::RightMouseDown, CGMouseButton::Right)
             }

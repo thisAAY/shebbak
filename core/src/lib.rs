@@ -1,6 +1,6 @@
-pub mod protocol;
-pub mod model;
-pub mod tracker;
-pub mod pixels;
 pub mod blit;
 pub mod classify;
+pub mod model;
+pub mod pixels;
+pub mod protocol;
+pub mod tracker;

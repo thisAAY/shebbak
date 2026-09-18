@@ -102,7 +102,14 @@ pub fn list_windows() -> Result<Vec<WindowListEntry>> {
             continue; // skip tiny utility windows
         }
         out.push(WindowListEntry {
-            info: WindowInfo { id, title, x, y, width: w, height: h },
+            info: WindowInfo {
+                id,
+                title,
+                x,
+                y,
+                width: w,
+                height: h,
+            },
             pid,
             app_name,
         });
@@ -138,9 +145,8 @@ pub fn list_apps() -> Result<Vec<AppEntry>> {
 /// layers (menus/tooltips included), front-to-back order. `ax_role`/`minimized` are
 /// filled in by the caller via `ax_meta`; here they're Unknown/false.
 pub fn snapshot_windows(pids: &HashSet<i32>) -> Result<Vec<SnapshotWindow>> {
-    let raw = unsafe {
-        CGWindowListCopyWindowInfo(kCGWindowListExcludeDesktopElements, kCGNullWindowID)
-    };
+    let raw =
+        unsafe { CGWindowListCopyWindowInfo(kCGWindowListExcludeDesktopElements, kCGNullWindowID) };
     if raw.is_null() {
         anyhow::bail!("CGWindowListCopyWindowInfo returned null (no WindowServer session?)");
     }
@@ -181,7 +187,14 @@ pub fn snapshot_windows(pids: &HashSet<i32>) -> Result<Vec<SnapshotWindow>> {
             continue; // 1-px artifacts, not tooltips
         }
         out.push(SnapshotWindow {
-            info: WindowInfo { id, title, x, y, width: w, height: h },
+            info: WindowInfo {
+                id,
+                title,
+                x,
+                y,
+                width: w,
+                height: h,
+            },
             pid,
             layer,
             on_screen,

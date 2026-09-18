@@ -2,12 +2,19 @@ use crate::model::{AxRole, SnapshotWindow, WindowInfo};
 use crate::protocol::WindowKind;
 
 pub fn classify(layer: i64, ax_role: AxRole) -> WindowKind {
-    if layer != 0 { WindowKind::Transient }
-    else if ax_role == AxRole::Sheet { WindowKind::Sheet }
-    else { WindowKind::Normal }
+    if layer != 0 {
+        WindowKind::Transient
+    } else if ax_role == AxRole::Sheet {
+        WindowKind::Sheet
+    } else {
+        WindowKind::Normal
+    }
 }
 
-pub fn parent_for<'a>(child: &SnapshotWindow, ordered: &'a [SnapshotWindow]) -> Option<&'a SnapshotWindow> {
+pub fn parent_for<'a>(
+    child: &SnapshotWindow,
+    ordered: &'a [SnapshotWindow],
+) -> Option<&'a SnapshotWindow> {
     ordered.iter().find(|w| {
         w.info.id != child.info.id
             && w.pid == child.pid
@@ -26,8 +33,19 @@ mod tests {
 
     fn snap(id: u32, pid: i32, layer: i64, role: AxRole, x: f64, y: f64) -> SnapshotWindow {
         SnapshotWindow {
-            info: WindowInfo { id, title: String::new(), x, y, width: 100.0, height: 100.0 },
-            pid, layer, on_screen: true, ax_role: role, minimized: false,
+            info: WindowInfo {
+                id,
+                title: String::new(),
+                x,
+                y,
+                width: 100.0,
+                height: 100.0,
+            },
+            pid,
+            layer,
+            on_screen: true,
+            ax_role: role,
+            minimized: false,
         }
     }
 
@@ -68,8 +86,22 @@ mod tests {
 
     #[test]
     fn offset_is_child_minus_parent_origin() {
-        let p = WindowInfo { id: 1, title: String::new(), x: 100.0, y: 50.0, width: 800.0, height: 600.0 };
-        let c = WindowInfo { id: 2, title: String::new(), x: 130.0, y: 90.0, width: 200.0, height: 300.0 };
+        let p = WindowInfo {
+            id: 1,
+            title: String::new(),
+            x: 100.0,
+            y: 50.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let c = WindowInfo {
+            id: 2,
+            title: String::new(),
+            x: 130.0,
+            y: 90.0,
+            width: 200.0,
+            height: 300.0,
+        };
         assert_eq!(parent_offset(&p, &c), (30.0, 40.0));
     }
 }

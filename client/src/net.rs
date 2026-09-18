@@ -14,9 +14,17 @@ use webrtc::track::track_remote::TrackRemote;
 /// Events pushed to the UI thread. The winit side drains these on wake.
 pub enum UiEvent {
     Host(HostMessage),
-    TrackFrame { track_id: String, frame: BgraFrame },
-    TrackOpened { track_id: String },
-    Blit { window_id: srw_core::protocol::WindowId, png: Vec<u8> },
+    TrackFrame {
+        track_id: String,
+        frame: BgraFrame,
+    },
+    TrackOpened {
+        track_id: String,
+    },
+    Blit {
+        window_id: srw_core::protocol::WindowId,
+        png: Vec<u8>,
+    },
     Disconnected,
 }
 
@@ -89,7 +97,9 @@ pub fn connect(
         let rt_handle = rt.handle().clone();
         peer.on_track(move |track_id, track| {
             info!("track arrived: {track_id}");
-            let _ = ui.send(UiEvent::TrackOpened { track_id: track_id.clone() });
+            let _ = ui.send(UiEvent::TrackOpened {
+                track_id: track_id.clone(),
+            });
             wake();
             let ui = ui.clone();
             let wake = wake.clone();
@@ -104,7 +114,9 @@ pub fn connect(
     // thread between two separate `block_on` calls, so it would panic here.
     // Run it on a blocking pool thread within one `block_on` instead.
     let answer = rt
-        .block_on(async move { tokio::task::spawn_blocking(move || post_offer(&url, &offer)).await })
+        .block_on(
+            async move { tokio::task::spawn_blocking(move || post_offer(&url, &offer)).await },
+        )
         .context("signalling task panicked")?
         .context("signalling failed — is the host running?")?;
     rt.block_on(peer.accept_answer(answer))?;
@@ -159,7 +171,10 @@ async fn read_track(
         while let Some(sample) = builder.pop() {
             match decoder.decode(&sample.data) {
                 Ok(Some(frame)) => {
-                    let _ = ui.send(UiEvent::TrackFrame { track_id: track_id.clone(), frame });
+                    let _ = ui.send(UiEvent::TrackFrame {
+                        track_id: track_id.clone(),
+                        frame,
+                    });
                     wake();
                 }
                 Ok(None) => {}

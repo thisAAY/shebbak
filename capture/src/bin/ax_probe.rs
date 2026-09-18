@@ -32,7 +32,10 @@ fn main() -> anyhow::Result<()> {
     let pids: HashSet<i32> = [pid].into_iter().collect();
     let pid_list = [pid];
 
-    println!("{:<8} {:<6} {:<10} {:<8} {:<9} title", "id", "layer", "on_screen", "role", "minimized");
+    println!(
+        "{:<8} {:<6} {:<10} {:<8} {:<9} title",
+        "id", "layer", "on_screen", "role", "minimized"
+    );
     loop {
         let mut wins = match snapshot_windows(&pids) {
             Ok(w) => w,

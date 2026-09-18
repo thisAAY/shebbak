@@ -20,12 +20,18 @@ fn main() -> anyhow::Result<()> {
             let x: f64 = args[3].parse()?;
             let y: f64 = args[4].parse()?;
             let p = CGPoint::new(x, y);
-            let down = CGEvent::new_mouse_event(src.clone(), CGEventType::LeftMouseDown, p, CGMouseButton::Left)
-                .map_err(|_| anyhow::anyhow!("event"))?;
+            let down = CGEvent::new_mouse_event(
+                src.clone(),
+                CGEventType::LeftMouseDown,
+                p,
+                CGMouseButton::Left,
+            )
+            .map_err(|_| anyhow::anyhow!("event"))?;
             down.post_to_pid(pid);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            let up = CGEvent::new_mouse_event(src, CGEventType::LeftMouseUp, p, CGMouseButton::Left)
-                .map_err(|_| anyhow::anyhow!("event"))?;
+            let up =
+                CGEvent::new_mouse_event(src, CGEventType::LeftMouseUp, p, CGMouseButton::Left)
+                    .map_err(|_| anyhow::anyhow!("event"))?;
             up.post_to_pid(pid);
             println!("posted click to pid {pid} at ({x},{y})");
         }
@@ -44,15 +50,24 @@ fn main() -> anyhow::Result<()> {
             let x: f64 = args[3].parse()?;
             let y: f64 = args[4].parse()?;
             let mv = CGEvent::new_mouse_event(
-                src, CGEventType::MouseMoved, CGPoint::new(x, y), CGMouseButton::Left,
-            ).map_err(|_| anyhow::anyhow!("event"))?;
+                src,
+                CGEventType::MouseMoved,
+                CGPoint::new(x, y),
+                CGMouseButton::Left,
+            )
+            .map_err(|_| anyhow::anyhow!("event"))?;
             mv.post_to_pid(pid);
             println!("posted move to pid {pid} at ({x},{y})");
         }
-        _ => { eprintln!("usage: pid_input_spike <pid> click|key|move ..."); std::process::exit(2); }
+        _ => {
+            eprintln!("usage: pid_input_spike <pid> click|key|move ...");
+            std::process::exit(2);
+        }
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn main() { eprintln!("macOS only"); }
+fn main() {
+    eprintln!("macOS only");
+}

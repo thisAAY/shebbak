@@ -9,9 +9,14 @@ fn main() -> anyhow::Result<()> {
         .expect("usage: snapshot_probe <window_id> [out.png]")
         .parse()
         .expect("window_id must be an integer");
-    let out_path = args.next().unwrap_or_else(|| "snapshot_probe_last.png".to_string());
+    let out_path = args
+        .next()
+        .unwrap_or_else(|| "snapshot_probe_last.png".to_string());
 
-    println!("{:<4} {:>9} {:>10} {:>12} alpha", "iter", "ms", "png_bytes", "wxh");
+    println!(
+        "{:<4} {:>9} {:>10} {:>12} alpha",
+        "iter", "ms", "png_bytes", "wxh"
+    );
 
     let mut last_png: Option<Vec<u8>> = None;
     for i in 0..20 {

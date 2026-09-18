@@ -31,7 +31,11 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
     // 2. Await data channel open: retry a host send until it succeeds.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if host.send(&HostMessage::WindowClosed { window_id: 0 }).await.is_ok() {
+            if host
+                .send(&HostMessage::WindowClosed { window_id: 0 })
+                .await
+                .is_ok()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -67,7 +71,11 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
     // 4. Sample writer, held so a panic surfaces at the end of the test.
     let writer_track = track.clone();
     let writer = tokio::spawn(async move {
-        let black = srw_core::pixels::BgraFrame { width: 64, height: 64, data: vec![0; 64 * 64 * 4] };
+        let black = srw_core::pixels::BgraFrame {
+            width: 64,
+            height: 64,
+            data: vec![0; 64 * 64 * 4],
+        };
         let mut enc = srw_transport::codec::H264Encoder::new().unwrap();
         loop {
             if let Ok(Some(au)) = enc.encode_bgra(&black) {
@@ -114,7 +122,10 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
     let mut assembler = BlitAssembler::new();
     let reassembled = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let msg = client_msg_rx.recv().await.expect("client message channel closed");
+            let msg = client_msg_rx
+                .recv()
+                .await
+                .expect("client message channel closed");
             if let Some(result) = assembler.push(&msg) {
                 return result;
             }
@@ -140,8 +151,14 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
 #[test]
 fn signalling_roundtrip_over_http() {
     use srw_transport::signalling::{post_offer, serve_one_offer};
-    let offer = RTCSessionDescription::offer("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string()).unwrap();
-    let answer_sdp = RTCSessionDescription::answer("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string()).unwrap();
+    let offer = RTCSessionDescription::offer(
+        "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
+    )
+    .unwrap();
+    let answer_sdp = RTCSessionDescription::answer(
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
+    )
+    .unwrap();
 
     let server = std::thread::spawn(move || {
         let (got_offer, responder) = serve_one_offer(19009).unwrap();

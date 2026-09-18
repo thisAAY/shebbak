@@ -10,10 +10,11 @@ use tracing::info;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into()),
-    ).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 
     // Permissions: fail loudly with directions (spec: tear down loudly).
     if !permissions::check_screen_recording() {
@@ -35,13 +36,22 @@ async fn main() -> Result<()> {
             .split(',')
             .map(|s| -> Result<i32> { Ok(s.trim().parse()?) })
             .collect::<Result<Vec<_>>>()?;
-        anyhow::ensure!(!pids.is_empty(), "SRW_SHARE_PIDS must list at least one pid");
+        anyhow::ensure!(
+            !pids.is_empty(),
+            "SRW_SHARE_PIDS must list at least one pid"
+        );
         pids
     } else {
         let apps = list_apps()?;
         println!("{:<4} {:<8} {:<24} windows", "idx", "pid", "app");
         for (i, a) in apps.iter().enumerate() {
-            println!("{:<4} {:<8} {:<24} {}", i, a.pid, a.app_name, a.window_titles.join(" | "));
+            println!(
+                "{:<4} {:<8} {:<24} {}",
+                i,
+                a.pid,
+                a.app_name,
+                a.window_titles.join(" | ")
+            );
         }
         print!("app indices to share (comma-separated): ");
         std::io::stdout().flush()?;

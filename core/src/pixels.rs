@@ -7,22 +7,34 @@ mod tests {
         for _ in 0..width * height {
             data.extend_from_slice(&[b, g, r, 255]);
         }
-        BgraFrame { width, height, data }
+        BgraFrame {
+            width,
+            height,
+            data,
+        }
     }
 
     fn assert_roundtrip_close(orig: &BgraFrame) {
         let i420 = bgra_to_i420(orig);
         let w = orig.width as usize;
         let back = i420_to_bgra(
-            orig.width, orig.height,
-            &i420.y, &i420.u, &i420.v,
-            w, w / 2, w / 2,
+            orig.width,
+            orig.height,
+            &i420.y,
+            &i420.u,
+            &i420.v,
+            w,
+            w / 2,
+            w / 2,
         );
         for (a, b) in orig.data.chunks(4).zip(back.data.chunks(4)) {
             for c in 0..3 {
                 assert!(
                     (a[c] as i32 - b[c] as i32).abs() <= 4,
-                    "channel {} diverged: {} vs {}", c, a[c], b[c]
+                    "channel {} diverged: {} vs {}",
+                    c,
+                    a[c],
+                    b[c]
                 );
             }
         }
@@ -39,7 +51,14 @@ mod tests {
 
     #[test]
     fn solid_colors_roundtrip() {
-        for (b, g, r) in [(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (255, 255, 255), (0, 0, 0), (128, 64, 200)] {
+        for (b, g, r) in [
+            (255u8, 0u8, 0u8),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 255),
+            (0, 0, 0),
+            (128, 64, 200),
+        ] {
             assert_roundtrip_close(&solid(16, 16, b, g, r));
         }
     }
@@ -50,16 +69,41 @@ mod tests {
         let mut data = Vec::new();
         for yy in 0..h {
             for xx in 0..w {
-                data.extend_from_slice(&[(xx * 8) as u8, (yy * 8) as u8, ((xx + yy) * 4) as u8, 255]);
+                data.extend_from_slice(&[
+                    (xx * 8) as u8,
+                    (yy * 8) as u8,
+                    ((xx + yy) * 4) as u8,
+                    255,
+                ]);
             }
         }
         // Gradient chroma is averaged over 2x2, so only check Y-dominant closeness loosely:
-        let orig = BgraFrame { width: w, height: h, data };
+        let orig = BgraFrame {
+            width: w,
+            height: h,
+            data,
+        };
         let i420 = bgra_to_i420(&orig);
-        let back = i420_to_bgra(w, h, &i420.y, &i420.u, &i420.v, w as usize, w as usize / 2, w as usize / 2);
+        let back = i420_to_bgra(
+            w,
+            h,
+            &i420.y,
+            &i420.u,
+            &i420.v,
+            w as usize,
+            w as usize / 2,
+            w as usize / 2,
+        );
         // Average absolute error across the image must be small.
-        let total: i64 = orig.data.chunks(4).zip(back.data.chunks(4))
-            .map(|(a, b)| (0..3).map(|c| (a[c] as i64 - b[c] as i64).abs()).sum::<i64>())
+        let total: i64 = orig
+            .data
+            .chunks(4)
+            .zip(back.data.chunks(4))
+            .map(|(a, b)| {
+                (0..3)
+                    .map(|c| (a[c] as i64 - b[c] as i64).abs())
+                    .sum::<i64>()
+            })
             .sum();
         let avg = total as f64 / (w * h * 3) as f64;
         assert!(avg < 6.0, "average channel error too high: {}", avg);
@@ -119,7 +163,12 @@ fn clamp_u8(v: i32) -> u8 {
 pub fn bgra_to_i420(frame: &BgraFrame) -> I420Frame {
     let w = frame.width as usize;
     let h = frame.height as usize;
-    assert!(w.is_multiple_of(2) && h.is_multiple_of(2), "bgra_to_i420 requires even dimensions, got {}x{}", w, h);
+    assert!(
+        w.is_multiple_of(2) && h.is_multiple_of(2),
+        "bgra_to_i420 requires even dimensions, got {}x{}",
+        w,
+        h
+    );
     assert_eq!(frame.data.len(), w * h * 4);
 
     let mut y_plane = vec![0u8; w * h];
@@ -152,7 +201,13 @@ pub fn bgra_to_i420(frame: &BgraFrame) -> I420Frame {
             v_plane[cy * (w / 2) + cx] = clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
         }
     }
-    I420Frame { width: frame.width, height: frame.height, y: y_plane, u: u_plane, v: v_plane }
+    I420Frame {
+        width: frame.width,
+        height: frame.height,
+        y: y_plane,
+        u: u_plane,
+        v: v_plane,
+    }
 }
 
 /// BT.601 limited-range I420 → BGRA, honoring source plane strides.
@@ -185,5 +240,9 @@ pub fn i420_to_bgra(
             data[i + 3] = 255;
         }
     }
-    BgraFrame { width, height, data }
+    BgraFrame {
+        width,
+        height,
+        data,
+    }
 }

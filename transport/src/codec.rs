@@ -12,7 +12,11 @@ impl YUVSource for I420Source<'_> {
         (self.0.width as usize, self.0.height as usize)
     }
     fn strides(&self) -> (usize, usize, usize) {
-        (self.0.width as usize, self.0.width as usize / 2, self.0.width as usize / 2)
+        (
+            self.0.width as usize,
+            self.0.width as usize / 2,
+            self.0.width as usize / 2,
+        )
     }
     fn y(&self) -> &[u8] {
         &self.0.y
@@ -39,7 +43,10 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     pub fn new() -> Result<Self> {
-        Ok(Self { inner: Encoder::new().context("create openh264 encoder")?, frame_count: 0 })
+        Ok(Self {
+            inner: Encoder::new().context("create openh264 encoder")?,
+            frame_count: 0,
+        })
     }
 
     /// Force the next encoded frame to be an IDR (PLI response path).
@@ -62,7 +69,10 @@ impl H264Encoder {
         }
         self.frame_count += 1;
         let i420 = bgra_to_i420(frame);
-        let bitstream = self.inner.encode(&I420Source(&i420)).context("encode frame")?;
+        let bitstream = self
+            .inner
+            .encode(&I420Source(&i420))
+            .context("encode frame")?;
         let bytes = bitstream.to_vec();
         if bytes.is_empty() {
             Ok(None)
@@ -78,7 +88,9 @@ pub struct H264Decoder {
 
 impl H264Decoder {
     pub fn new() -> Result<Self> {
-        Ok(Self { inner: Decoder::new().context("create openh264 decoder")? })
+        Ok(Self {
+            inner: Decoder::new().context("create openh264 decoder")?,
+        })
     }
 
     /// Decode one Annex-B access unit; None until a picture is available.
@@ -113,7 +125,11 @@ mod tests {
         for _ in 0..width * height {
             data.extend_from_slice(&[b, g, r, 255]);
         }
-        BgraFrame { width, height, data }
+        BgraFrame {
+            width,
+            height,
+            data,
+        }
     }
 
     #[test]
@@ -153,7 +169,11 @@ mod tests {
         let mut enc = H264Encoder::new().unwrap();
         let frame = solid(63, 64, 10, 20, 30);
         let result = enc.encode_bgra(&frame);
-        assert!(result.is_err(), "expected Err for odd-width frame, got {:?}", result.is_ok());
+        assert!(
+            result.is_err(),
+            "expected Err for odd-width frame, got {:?}",
+            result.is_ok()
+        );
     }
 
     /// Returns true if the Annex-B access unit contains an IDR slice NAL unit
@@ -189,10 +209,18 @@ mod tests {
         let mut enc = H264Encoder::new().unwrap();
         let frame = solid(64, 64, 20, 180, 240);
         // Warm past the initial IDR.
-        for _ in 0..5 { enc.encode_bgra(&frame).unwrap(); }
+        for _ in 0..5 {
+            enc.encode_bgra(&frame).unwrap();
+        }
         enc.force_idr();
-        let au = enc.encode_bgra(&frame).unwrap().expect("au after force_idr");
-        assert!(au_contains_idr(&au), "frame after force_idr() must contain an IDR NAL");
+        let au = enc
+            .encode_bgra(&frame)
+            .unwrap()
+            .expect("au after force_idr");
+        assert!(
+            au_contains_idr(&au),
+            "frame after force_idr() must contain an IDR NAL"
+        );
     }
 
     #[test]

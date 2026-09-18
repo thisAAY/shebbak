@@ -13,7 +13,10 @@ use srw_core::pixels::RgbaImage;
 /// correctly once decoded on the client (see [`RgbaImage`] docs).
 pub fn snapshot_window_rgba(window_id: u32) -> Result<RgbaImage> {
     // CGRectNull → "tight bounds of the listed windows".
-    let null_rect = CGRect::new(&CGPoint::new(f64::INFINITY, f64::INFINITY), &CGSize::new(0.0, 0.0));
+    let null_rect = CGRect::new(
+        &CGPoint::new(f64::INFINITY, f64::INFINITY),
+        &CGSize::new(0.0, 0.0),
+    );
     let image = create_image(
         null_rect,
         kCGWindowListOptionIncludingWindow,
@@ -45,7 +48,11 @@ pub fn snapshot_window_rgba(window_id: u32) -> Result<RgbaImage> {
             out.extend_from_slice(&[r, g, b, a]);
         }
     }
-    Ok(RgbaImage { width, height, data: out })
+    Ok(RgbaImage {
+        width,
+        height,
+        data: out,
+    })
 }
 
 /// RGBA → PNG bytes (what goes over the wire).

@@ -44,9 +44,7 @@ impl InputSink for PidInput {
             (MouseButton::Left, MouseAction::Down) => {
                 (CGEventType::LeftMouseDown, CGMouseButton::Left)
             }
-            (MouseButton::Left, MouseAction::Up) => {
-                (CGEventType::LeftMouseUp, CGMouseButton::Left)
-            }
+            (MouseButton::Left, MouseAction::Up) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
             (MouseButton::Right, MouseAction::Down) => {
                 (CGEventType::RightMouseDown, CGMouseButton::Right)
             }

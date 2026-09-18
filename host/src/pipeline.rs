@@ -23,7 +23,10 @@ pub(crate) struct FrameSlot {
 
 impl FrameSlot {
     pub(crate) fn new() -> Self {
-        Self { frame: Mutex::new(None), cv: Condvar::new() }
+        Self {
+            frame: Mutex::new(None),
+            cv: Condvar::new(),
+        }
     }
 
     /// Replace whatever frame is waiting (if any) and wake one waiter.
@@ -61,8 +64,7 @@ impl Pipeline {
     /// failure is a loud `Err` here, not a silently dead thread and a black
     /// window.
     pub fn start(track: Arc<TrackLocalStaticSample>, rt: Handle, label: String) -> Result<Self> {
-        let mut encoder =
-            H264Encoder::new().with_context(|| format!("{label}: encoder init"))?;
+        let mut encoder = H264Encoder::new().with_context(|| format!("{label}: encoder init"))?;
         let shared = Arc::new(Shared {
             slot: FrameSlot::new(),
             shutdown: AtomicBool::new(false),
@@ -125,7 +127,11 @@ mod tests {
     use super::*;
 
     fn frame(tag: u8) -> BgraFrame {
-        BgraFrame { width: 2, height: 2, data: vec![tag; 16] }
+        BgraFrame {
+            width: 2,
+            height: 2,
+            data: vec![tag; 16],
+        }
     }
 
     #[test]

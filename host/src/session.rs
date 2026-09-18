@@ -28,8 +28,14 @@ const RECONCILE_MS: u64 = 500;
 /// their pixels ride the control channel as blits, driven by the loop
 /// `blit` started in the `Opened` arm (`stop` is that loop's shutdown flag).
 enum WindowRuntime {
-    Track { pipeline: Arc<Pipeline>, capture: Option<Box<dyn WindowCapture>>, track_id: String },
-    Blit { stop: Option<Arc<AtomicBool>> },
+    Track {
+        pipeline: Arc<Pipeline>,
+        capture: Option<Box<dyn WindowCapture>>,
+        track_id: String,
+    },
+    Blit {
+        stop: Option<Arc<AtomicBool>>,
+    },
 }
 
 type RuntimeMap = HashMap<WindowId, WindowRuntime>;
@@ -71,7 +77,9 @@ fn local_lan_ip() -> Option<std::net::IpAddr> {
 
 fn teardown_runtime(rt: WindowRuntime) {
     match rt {
-        WindowRuntime::Track { pipeline, capture, .. } => {
+        WindowRuntime::Track {
+            pipeline, capture, ..
+        } => {
             if let Some(mut c) = capture {
                 c.stop();
             }
@@ -118,7 +126,10 @@ async fn open_track_window(
         }
     };
 
-    let (pw, ph) = (even_px(window.info.width, scale), even_px(window.info.height, scale));
+    let (pw, ph) = (
+        even_px(window.info.width, scale),
+        even_px(window.info.height, scale),
+    );
     let mut capture: Box<dyn WindowCapture> = match SckCapture::new(window.info.id, pw, ph, 30) {
         Ok(c) => Box::new(c),
         Err(e) => {
@@ -138,10 +149,17 @@ async fn open_track_window(
         "sharing window {} ('{}') at {pw}x{ph}px on {track_id}",
         window.info.id, window.info.title
     );
-    pli_pipelines.lock().unwrap().insert(track_id.to_string(), pipeline.clone());
+    pli_pipelines
+        .lock()
+        .unwrap()
+        .insert(track_id.to_string(), pipeline.clone());
     runtimes.insert(
         window.info.id,
-        WindowRuntime::Track { pipeline, capture: Some(capture), track_id: track_id.to_string() },
+        WindowRuntime::Track {
+            pipeline,
+            capture: Some(capture),
+            track_id: track_id.to_string(),
+        },
     );
     Ok(())
 }
@@ -151,8 +169,16 @@ async fn open_track_window(
 /// not the track — see the `Minimized` reconciler arm). A no-op if the window
 /// isn't a live `Track` runtime, already has a capture, or its geometry is no
 /// longer known to the tracker (closed out from under us).
-fn restart_capture(window_id: WindowId, scale: f64, tracker: &Arc<Mutex<AppTracker>>, runtimes: &mut RuntimeMap) {
-    let Some(WindowRuntime::Track { pipeline, capture, .. }) = runtimes.get_mut(&window_id) else {
+fn restart_capture(
+    window_id: WindowId,
+    scale: f64,
+    tracker: &Arc<Mutex<AppTracker>>,
+    runtimes: &mut RuntimeMap,
+) {
+    let Some(WindowRuntime::Track {
+        pipeline, capture, ..
+    }) = runtimes.get_mut(&window_id)
+    else {
         return;
     };
     if capture.is_some() {
@@ -208,7 +234,9 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
         .context("responder task panicked")??;
 
     let tracker = Arc::new(Mutex::new(AppTracker::new(pids)));
-    let mut source = PidSnapshotSource { pids: pids.iter().copied().collect() };
+    let mut source = PidSnapshotSource {
+        pids: pids.iter().copied().collect(),
+    };
 
     // Input routing (Task 16). Default comes from the Task-1 spike verdict
     // in docs/m2-input-spike-results.md (`activate`): AxInput
@@ -235,15 +263,22 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
     let input_worker = {
         let tracker = tracker.clone();
         let input = input.clone();
-        std::thread::Builder::new().name("input-worker".into()).spawn(move || {
-            for work in input_rx {
-                match work {
-                    InputWork::UpdatePids(map) => input.lock().unwrap().set_pid_map(map),
-                    InputWork::Message(msg) => {
-                        let mut sink = input.lock().unwrap();
-                        let r = match msg {
-                            ClientMessage::MouseInput { window_id, x, y, button, action } => {
-                                match tracker.lock().unwrap().geometry(window_id).cloned() {
+        std::thread::Builder::new()
+            .name("input-worker".into())
+            .spawn(move || {
+                for work in input_rx {
+                    match work {
+                        InputWork::UpdatePids(map) => input.lock().unwrap().set_pid_map(map),
+                        InputWork::Message(msg) => {
+                            let mut sink = input.lock().unwrap();
+                            let r = match msg {
+                                ClientMessage::MouseInput {
+                                    window_id,
+                                    x,
+                                    y,
+                                    button,
+                                    action,
+                                } => match tracker.lock().unwrap().geometry(window_id).cloned() {
                                     Some(win) => {
                                         let (sx, sy) = window_local_to_screen(&win, x, y);
                                         sink.mouse(window_id, sx, sy, button, action)
@@ -252,37 +287,43 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
                                         warn!("input for unknown window {window_id}");
                                         Ok(())
                                     }
-                                }
-                            }
-                            ClientMessage::MouseMove { window_id, x, y } => {
-                                match tracker.lock().unwrap().geometry(window_id).cloned() {
-                                    Some(win) => {
-                                        let (sx, sy) = window_local_to_screen(&win, x, y);
-                                        sink.mouse_move(window_id, sx, sy)
+                                },
+                                ClientMessage::MouseMove { window_id, x, y } => {
+                                    match tracker.lock().unwrap().geometry(window_id).cloned() {
+                                        Some(win) => {
+                                            let (sx, sy) = window_local_to_screen(&win, x, y);
+                                            sink.mouse_move(window_id, sx, sy)
+                                        }
+                                        None => Ok(()),
                                     }
-                                    None => Ok(()),
                                 }
+                                ClientMessage::KeyEvent {
+                                    window_id,
+                                    key_code,
+                                    down,
+                                    flags,
+                                } => sink.key(window_id, key_code, down, flags),
+                                ClientMessage::FocusChange { window_id } => sink.focus(window_id),
+                                ClientMessage::ResizeRequest {
+                                    window_id,
+                                    width,
+                                    height,
+                                } => sink.resize_window(window_id, width, height),
+                                ClientMessage::CloseRequest { window_id } => {
+                                    sink.close_window(window_id)
+                                }
+                                // Consumed inside HostPeer's dispatch — never reaches here.
+                                ClientMessage::SdpAnswer { .. } => Ok(()),
+                            };
+                            if let Err(e) = r {
+                                warn!("input delivery failed: {e:#}");
                             }
-                            ClientMessage::KeyEvent { window_id, key_code, down, flags } => {
-                                sink.key(window_id, key_code, down, flags)
-                            }
-                            ClientMessage::FocusChange { window_id } => sink.focus(window_id),
-                            ClientMessage::ResizeRequest { window_id, width, height } => {
-                                sink.resize_window(window_id, width, height)
-                            }
-                            ClientMessage::CloseRequest { window_id } => sink.close_window(window_id),
-                            // Consumed inside HostPeer's dispatch — never reaches here.
-                            ClientMessage::SdpAnswer { .. } => Ok(()),
-                        };
-                        if let Err(e) = r {
-                            warn!("input delivery failed: {e:#}");
                         }
+                        InputWork::Shutdown => break,
                     }
-                    InputWork::Shutdown => break,
                 }
-            }
-            info!("input worker exiting");
-        })?
+                info!("input worker exiting");
+            })?
     };
     {
         // Client → host messages: non-blocking hand-off to the ordered worker.
@@ -318,7 +359,10 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
             peer.close().await;
             anyhow::bail!("peer disconnected during setup");
         }
-        match peer.send(&HostMessage::WindowRestored { window_id: 0 }).await {
+        match peer
+            .send(&HostMessage::WindowRestored { window_id: 0 })
+            .await
+        {
             Ok(()) => break,
             Err(_) if std::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -338,9 +382,12 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
     // disconnect or a 20s timeout) has already succeeded by the time this
     // runs, so no early return here can race a fresh watcher's startup.
     let (poke_tx, mut poke_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let watcher = AxWatcher::spawn(pids.to_vec(), Box::new(move || {
-        let _ = poke_tx.send(());
-    }))?;
+    let watcher = AxWatcher::spawn(
+        pids.to_vec(),
+        Box::new(move || {
+            let _ = poke_tx.send(());
+        }),
+    )?;
     // `spawn()` only guarantees the watcher thread has SENT its run-loop
     // handle back, not that CFRunLoopRun() has started executing yet (see
     // AxWatcher::stop's doc). If the peer were already disconnected at this
@@ -430,12 +477,26 @@ async fn run_session_body(
         let mut tracks_changed = false;
         for ev in events {
             match ev {
-                TrackerEvent::Opened { window, kind, parent_id, offset_x, offset_y } => {
+                TrackerEvent::Opened {
+                    window,
+                    kind,
+                    parent_id,
+                    offset_x,
+                    offset_y,
+                } => {
                     let track_id = match kind {
                         WindowKind::Normal | WindowKind::Sheet => {
                             let tid = format!("win-{}", window.info.id);
-                            match open_track_window(peer, &rt, scale, &window, &tid, runtimes, pli_pipelines)
-                                .await
+                            match open_track_window(
+                                peer,
+                                &rt,
+                                scale,
+                                &window,
+                                &tid,
+                                runtimes,
+                                pli_pipelines,
+                            )
+                            .await
                             {
                                 Ok(()) => {
                                     tracks_changed = true;
@@ -477,7 +538,11 @@ async fn run_session_body(
                         runtimes.insert(
                             window.info.id,
                             WindowRuntime::Blit {
-                                stop: Some(blit::start_blit(window.info.id, peer.clone(), rt.clone())),
+                                stop: Some(blit::start_blit(
+                                    window.info.id,
+                                    peer.clone(),
+                                    rt.clone(),
+                                )),
                             },
                         );
                     }
@@ -496,7 +561,8 @@ async fn run_session_body(
                     let _ = peer.send(&HostMessage::WindowClosed { window_id }).await;
                 }
                 TrackerEvent::Minimized { window_id } => {
-                    if let Some(WindowRuntime::Track { capture, .. }) = runtimes.get_mut(&window_id) {
+                    if let Some(WindowRuntime::Track { capture, .. }) = runtimes.get_mut(&window_id)
+                    {
                         // Pause: drop the capture, keep the pipeline + track alive.
                         if let Some(mut c) = capture.take() {
                             c.stop();
@@ -508,17 +574,32 @@ async fn run_session_body(
                     restart_capture(window_id, scale, tracker, runtimes);
                     let _ = peer.send(&HostMessage::WindowRestored { window_id }).await;
                 }
-                TrackerEvent::Resized { window_id, width, height } => {
-                    if let Some(WindowRuntime::Track { capture: Some(c), .. }) = runtimes.get_mut(&window_id) {
+                TrackerEvent::Resized {
+                    window_id,
+                    width,
+                    height,
+                } => {
+                    if let Some(WindowRuntime::Track {
+                        capture: Some(c), ..
+                    }) = runtimes.get_mut(&window_id)
+                    {
                         let (pw, ph) = (even_px(width, scale), even_px(height, scale));
                         if let Err(e) = c.reconfigure(pw, ph) {
                             warn!("reconfigure {window_id}: {e}");
                         }
                     }
-                    let _ = peer.send(&HostMessage::WindowResized { window_id, width, height }).await;
+                    let _ = peer
+                        .send(&HostMessage::WindowResized {
+                            window_id,
+                            width,
+                            height,
+                        })
+                        .await;
                 }
                 TrackerEvent::TitleChanged { window_id, title } => {
-                    let _ = peer.send(&HostMessage::WindowTitleChanged { window_id, title }).await;
+                    let _ = peer
+                        .send(&HostMessage::WindowTitleChanged { window_id, title })
+                        .await;
                 }
             }
         }

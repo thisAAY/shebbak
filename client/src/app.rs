@@ -2,7 +2,9 @@ use crate::net::{send_client_msg, Net, UiEvent};
 use softbuffer::{Context, Surface};
 use srw_core::model::{OpenedWindow, TrackBinder, WindowInfo};
 use srw_core::pixels::{BgraFrame, RgbaImage};
-use srw_core::protocol::{ClientMessage, HostMessage, MouseAction, MouseButton, WindowId, WindowKind};
+use srw_core::protocol::{
+    ClientMessage, HostMessage, MouseAction, MouseButton, WindowId, WindowKind,
+};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -51,9 +53,16 @@ fn decode_png(bytes: &[u8]) -> anyhow::Result<RgbaImage> {
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf)?;
-    anyhow::ensure!(info.color_type == png::ColorType::Rgba, "expected RGBA after transform");
+    anyhow::ensure!(
+        info.color_type == png::ColorType::Rgba,
+        "expected RGBA after transform"
+    );
     buf.truncate(info.buffer_size());
-    Ok(RgbaImage { width: info.width, height: info.height, data: buf })
+    Ok(RgbaImage {
+        width: info.width,
+        height: info.height,
+        data: buf,
+    })
 }
 
 pub struct Mirror {
@@ -117,10 +126,25 @@ impl App {
         while let Ok(ev) = self.ui_rx.try_recv() {
             match ev {
                 UiEvent::Host(HostMessage::WindowOpened {
-                    window_id, title, kind, parent_id, offset_x, offset_y, width, height, track_id,
+                    window_id,
+                    title,
+                    kind,
+                    parent_id,
+                    offset_x,
+                    offset_y,
+                    width,
+                    height,
+                    track_id,
                 }) => {
                     let ann = OpenedWindow {
-                        info: WindowInfo { id: window_id, title, x: 0.0, y: 0.0, width, height },
+                        info: WindowInfo {
+                            id: window_id,
+                            title,
+                            x: 0.0,
+                            y: 0.0,
+                            width,
+                            height,
+                        },
                         kind,
                         parent_id,
                         offset: (offset_x, offset_y),
@@ -170,7 +194,11 @@ impl App {
                         }
                     } // unknown id (e.g. the host's channel-open probe with id 0): ignore silently
                 }
-                UiEvent::Host(HostMessage::WindowResized { window_id, width, height }) => {
+                UiEvent::Host(HostMessage::WindowResized {
+                    window_id,
+                    width,
+                    height,
+                }) => {
                     if let Some(m) = self.mirror_for_remote(window_id) {
                         m.last_host_size = (width, height);
                         let _ = m.window.request_inner_size(LogicalSize::new(width, height));
@@ -179,7 +207,11 @@ impl App {
                 UiEvent::Host(HostMessage::WindowTitleChanged { window_id, title }) => {
                     if let Some(m) = self.mirror_for_remote(window_id) {
                         m.base_title = title.clone();
-                        let shown = if m.minimized { format!("{title} (minimized)") } else { title };
+                        let shown = if m.minimized {
+                            format!("{title} (minimized)")
+                        } else {
+                            title
+                        };
                         m.window.set_title(&shown);
                     }
                 }
@@ -237,7 +269,10 @@ impl App {
             // A second WindowOpened for a live remote id would overwrite
             // `by_remote` and strand the first Mirror unreachable (an
             // undecorated always-on-top window nothing can ever destroy).
-            warn!("duplicate WindowOpened for live remote window {}; ignoring", ann.info.id);
+            warn!(
+                "duplicate WindowOpened for live remote window {}; ignoring",
+                ann.info.id
+            );
             return;
         }
         let attrs = match ann.kind {
@@ -262,8 +297,10 @@ impl App {
                 }
                 // Parent-relative placement: parent mirror origin + host-point
                 // offset, scaled by the PARENT mirror's own scale factor.
-                if let Some(parent) =
-                    ann.parent_id.and_then(|pid| self.by_remote.get(&pid)).and_then(|wid| self.mirrors.get(wid))
+                if let Some(parent) = ann
+                    .parent_id
+                    .and_then(|pid| self.by_remote.get(&pid))
+                    .and_then(|wid| self.mirrors.get(wid))
                 {
                     if let Ok(pos) = parent.window.inner_position() {
                         let scale = parent.window.scale_factor();
@@ -289,7 +326,11 @@ impl App {
         // Track-backed windows may seed from a frame that arrived just before
         // this mirror was created. Transients have no track and no analogous
         // early-blit buffer — see the Blit arm in `drain` for why.
-        let content = self.early_frames.remove(&ann.track_id).map(MirrorContent::Video).unwrap_or(MirrorContent::None);
+        let content = self
+            .early_frames
+            .remove(&ann.track_id)
+            .map(MirrorContent::Video)
+            .unwrap_or(MirrorContent::None);
         let mirror = Mirror {
             window,
             surface,
@@ -310,7 +351,10 @@ impl App {
         if !ann.track_id.is_empty() {
             self.by_track.insert(ann.track_id, wid);
         }
-        info!("mirror created for remote window {} (kind {:?})", ann.info.id, ann.kind);
+        info!(
+            "mirror created for remote window {} (kind {:?})",
+            ann.info.id, ann.kind
+        );
     }
 
     fn destroy_mirror_by_remote(&mut self, remote: WindowId) {
@@ -340,15 +384,20 @@ impl App {
     }
 
     fn redraw(&mut self, wid: WinitWindowId) {
-        let Some(m) = self.mirrors.get_mut(&wid) else { return };
+        let Some(m) = self.mirrors.get_mut(&wid) else {
+            return;
+        };
         let size = m.window.inner_size();
-        let (Some(sw), Some(sh)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+        let (Some(sw), Some(sh)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        else {
             return;
         };
         if m.surface.resize(sw, sh).is_err() {
             return;
         }
-        let Ok(mut buf) = m.surface.buffer_mut() else { return };
+        let Ok(mut buf) = m.surface.buffer_mut() else {
+            return;
+        };
         match &m.content {
             MirrorContent::None => buf.fill(0xFF202020),
             MirrorContent::Video(frame) => {
@@ -393,8 +442,10 @@ impl App {
                             img.data[si + 3] as u32,
                         );
                         // Premultiply for the compositor; alpha in the top byte.
-                        buf[dy * dw + dx] =
-                            (a << 24) | ((r * a / 255) << 16) | ((g * a / 255) << 8) | (b * a / 255);
+                        buf[dy * dw + dx] = (a << 24)
+                            | ((r * a / 255) << 16)
+                            | ((g * a / 255) << 8)
+                            | (b * a / 255);
                     }
                 }
             }
@@ -410,7 +461,12 @@ impl ApplicationHandler for App {
         self.drain(event_loop);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, wid: WinitWindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        wid: WinitWindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::RedrawRequested => self.redraw(wid),
             WindowEvent::ModifiersChanged(mods) => {
@@ -419,7 +475,9 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 use winit::keyboard::{KeyCode, PhysicalKey};
                 use winit::platform::scancode::PhysicalKeyExtScancode;
-                let Some(m) = self.mirrors.get(&wid) else { return };
+                let Some(m) = self.mirrors.get(&wid) else {
+                    return;
+                };
                 let down = event.state == ElementState::Pressed;
                 // Local Cmd+Q quits the client; never forwarded.
                 if down
@@ -430,7 +488,9 @@ impl ApplicationHandler for App {
                     return;
                 }
                 // On macOS to_scancode() yields the Carbon virtual keycode == CGKeyCode.
-                let Some(code) = event.physical_key.to_scancode() else { return };
+                let Some(code) = event.physical_key.to_scancode() else {
+                    return;
+                };
                 send_client_msg(
                     &self.net,
                     ClientMessage::KeyEvent {
@@ -462,12 +522,19 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(true) => {
                 if let Some(m) = self.mirrors.get(&wid) {
                     if m.kind == WindowKind::Normal || m.kind == WindowKind::Sheet {
-                        send_client_msg(&self.net, ClientMessage::FocusChange { window_id: m.remote_id });
+                        send_client_msg(
+                            &self.net,
+                            ClientMessage::FocusChange {
+                                window_id: m.remote_id,
+                            },
+                        );
                     }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let Some(m) = self.mirrors.get(&wid) else { return };
+                let Some(m) = self.mirrors.get(&wid) else {
+                    return;
+                };
                 let button = match button {
                     WinitMouseButton::Left => MouseButton::Left,
                     WinitMouseButton::Right => MouseButton::Right,
@@ -500,11 +567,17 @@ impl ApplicationHandler for App {
                         // re-clears it and floods the host with a
                         // ResizeRequest per frame (and the host's own echo of
                         // this resize would otherwise pass the guard too).
-                        if (w - m.last_host_size.0).abs() >= 1.0 || (h - m.last_host_size.1).abs() >= 1.0 {
+                        if (w - m.last_host_size.0).abs() >= 1.0
+                            || (h - m.last_host_size.1).abs() >= 1.0
+                        {
                             m.last_host_size = (w, h);
                             send_client_msg(
                                 &self.net,
-                                ClientMessage::ResizeRequest { window_id: m.remote_id, width: w, height: h },
+                                ClientMessage::ResizeRequest {
+                                    window_id: m.remote_id,
+                                    width: w,
+                                    height: h,
+                                },
                             );
                         }
                     }
@@ -512,7 +585,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CloseRequested => {
                 if let Some(m) = self.mirrors.get(&wid) {
-                    send_client_msg(&self.net, ClientMessage::CloseRequest { window_id: m.remote_id });
+                    send_client_msg(
+                        &self.net,
+                        ClientMessage::CloseRequest {
+                            window_id: m.remote_id,
+                        },
+                    );
                     // Keep the mirror: it dies only on the host's WindowClosed.
                     // An unsaved-changes sheet will arrive as a new mirrored window.
                 }
@@ -532,8 +610,14 @@ mod tests {
         use winit::keyboard::ModifiersState;
         assert_eq!(cg_flags(ModifiersState::empty()), 0);
         assert_eq!(cg_flags(ModifiersState::SHIFT), 0x0002_0000);
-        assert_eq!(cg_flags(ModifiersState::SUPER | ModifiersState::SHIFT), 0x0012_0000);
-        assert_eq!(cg_flags(ModifiersState::CONTROL | ModifiersState::ALT), 0x000C_0000);
+        assert_eq!(
+            cg_flags(ModifiersState::SUPER | ModifiersState::SHIFT),
+            0x0012_0000
+        );
+        assert_eq!(
+            cg_flags(ModifiersState::CONTROL | ModifiersState::ALT),
+            0x000C_0000
+        );
     }
 
     /// Encode a small RGBA image (with partial alpha, to exercise the
@@ -571,7 +655,10 @@ mod tests {
             pixels.extend_from_slice(&bytes);
         }
         let png_bytes = encode_test_png(w, h, &pixels);
-        assert!(png_bytes.len() > srw_core::blit::BLIT_CHUNK_BYTES, "test image should span multiple chunks");
+        assert!(
+            png_bytes.len() > srw_core::blit::BLIT_CHUNK_BYTES,
+            "test image should span multiple chunks"
+        );
 
         let chunks = chunk_blit(42, 1, &png_bytes);
         assert!(chunks.len() > 1);

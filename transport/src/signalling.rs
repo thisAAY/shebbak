@@ -22,7 +22,13 @@ pub fn serve_one_offer(port: u16) -> Result<(RTCSessionDescription, OfferRespond
             .context("read offer body")?;
         let offer: RTCSessionDescription =
             serde_json::from_str(&body).context("parse offer SDP JSON")?;
-        return Ok((offer, OfferResponder { request, _server: server }));
+        return Ok((
+            offer,
+            OfferResponder {
+                request,
+                _server: server,
+            },
+        ));
     }
 }
 
@@ -36,8 +42,11 @@ impl OfferResponder {
         let json = serde_json::to_string(answer)?;
         self.request
             .respond(
-                tiny_http::Response::from_string(json)
-                    .with_header("Content-Type: application/json".parse::<tiny_http::Header>().unwrap()),
+                tiny_http::Response::from_string(json).with_header(
+                    "Content-Type: application/json"
+                        .parse::<tiny_http::Header>()
+                        .unwrap(),
+                ),
             )
             .context("respond with answer")?;
         Ok(())

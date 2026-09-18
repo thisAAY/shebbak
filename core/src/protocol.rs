@@ -27,11 +27,24 @@ pub enum HostMessage {
         height: f64,
         track_id: Option<String>,
     },
-    WindowResized { window_id: WindowId, width: f64, height: f64 },
-    WindowTitleChanged { window_id: WindowId, title: String },
-    WindowMinimized { window_id: WindowId },
-    WindowRestored { window_id: WindowId },
-    WindowClosed { window_id: WindowId },
+    WindowResized {
+        window_id: WindowId,
+        width: f64,
+        height: f64,
+    },
+    WindowTitleChanged {
+        window_id: WindowId,
+        title: String,
+    },
+    WindowMinimized {
+        window_id: WindowId,
+    },
+    WindowRestored {
+        window_id: WindowId,
+    },
+    WindowClosed {
+        window_id: WindowId,
+    },
     TransientBlit {
         window_id: WindowId,
         seq: u32,
@@ -39,7 +52,9 @@ pub enum HostMessage {
         chunk_count: u16,
         data_b64: String,
     },
-    SdpOffer { sdp: String },
+    SdpOffer {
+        sdp: String,
+    },
 }
 
 /// Client → host messages on the control data channel.
@@ -53,21 +68,31 @@ pub enum ClientMessage {
         button: MouseButton,
         action: MouseAction,
     },
-    MouseMove { window_id: WindowId, x: f64, y: f64 },
+    MouseMove {
+        window_id: WindowId,
+        x: f64,
+        y: f64,
+    },
     KeyEvent {
         window_id: WindowId,
         key_code: u16,
         down: bool,
         flags: u64,
     },
-    FocusChange { window_id: WindowId },
+    FocusChange {
+        window_id: WindowId,
+    },
     ResizeRequest {
         window_id: WindowId,
         width: f64,
         height: f64,
     },
-    CloseRequest { window_id: WindowId },
-    SdpAnswer { sdp: String },
+    CloseRequest {
+        window_id: WindowId,
+    },
+    SdpAnswer {
+        sdp: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,13 +5,14 @@ use anyhow::Result;
 use winit::event_loop::EventLoop;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into()),
-    ).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 
-    let signal_url = std::env::var("SRW_HOST")
-        .unwrap_or_else(|_| "http://127.0.0.1:9009/offer".to_string());
+    let signal_url =
+        std::env::var("SRW_HOST").unwrap_or_else(|_| "http://127.0.0.1:9009/offer".to_string());
 
     let event_loop: EventLoop<()> = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();

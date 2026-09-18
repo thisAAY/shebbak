@@ -34,7 +34,10 @@ async fn new_pc() -> Result<Arc<RTCPeerConnection>> {
         .with_interceptor_registry(registry)
         .build();
     // Loopback: no STUN/TURN needed, host candidates suffice.
-    let config = RTCConfiguration { ice_servers: vec![], ..Default::default() };
+    let config = RTCConfiguration {
+        ice_servers: vec![],
+        ..Default::default()
+    };
     Ok(Arc::new(api.new_peer_connection(config).await?))
 }
 
@@ -58,7 +61,11 @@ async fn send_json<T: serde::Serialize>(
     dc: &Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     msg: &T,
 ) -> Result<()> {
-    let ch = dc.lock().unwrap().clone().ok_or_else(|| anyhow!("data channel not open"))?;
+    let ch = dc
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("data channel not open"))?;
     let json = serde_json::to_string(msg)?;
     ch.send_text(json).await.context("send on data channel")?;
     Ok(())
@@ -67,12 +74,17 @@ async fn send_json<T: serde::Serialize>(
 /// The ordered (media type, mid) pairs across an SDP's media sections, used to
 /// tell whether an answer structurally corresponds to a particular offer.
 fn media_section_mids(desc: &RTCSessionDescription) -> Result<Vec<(String, Option<String>)>> {
-    let parsed = desc.unmarshal().context("unmarshal SDP for renegotiation validation")?;
+    let parsed = desc
+        .unmarshal()
+        .context("unmarshal SDP for renegotiation validation")?;
     Ok(parsed
         .media_descriptions
         .iter()
         .map(|m| {
-            let mid = m.attribute(webrtc::sdp::description::session::ATTR_KEY_MID).flatten().map(str::to_owned);
+            let mid = m
+                .attribute(webrtc::sdp::description::session::ATTR_KEY_MID)
+                .flatten()
+                .map(str::to_owned);
             (m.media_name.media.clone(), mid)
         })
         .collect())
@@ -223,12 +235,22 @@ impl HostPeer {
     /// drain task for it. Does NOT renegotiate — call renegotiate() after.
     pub async fn add_track(&self, track_id: &str) -> Result<Arc<TrackLocalStaticSample>> {
         let track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability { mime_type: MIME_TYPE_H264.to_owned(), ..Default::default() },
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_H264.to_owned(),
+                ..Default::default()
+            },
             track_id.to_owned(),
             track_id.to_owned(), // stream_id == track_id: client binds on either
         ));
-        let sender = self.pc.add_track(track.clone()).await.context("add_track")?;
-        self.senders.lock().unwrap().insert(track_id.to_owned(), sender.clone());
+        let sender = self
+            .pc
+            .add_track(track.clone())
+            .await
+            .context("add_track")?;
+        self.senders
+            .lock()
+            .unwrap()
+            .insert(track_id.to_owned(), sender.clone());
         // Drain RTCP so NACK/PLI interceptors run; surface PLI to the pipeline.
         let tid = track_id.to_owned();
         let on_pli = self.on_pli.clone();
@@ -254,7 +276,10 @@ impl HostPeer {
             .unwrap()
             .remove(track_id)
             .ok_or_else(|| anyhow!("no sender for track {track_id}"))?;
-        self.pc.remove_track(&sender).await.context("remove_track")?;
+        self.pc
+            .remove_track(&sender)
+            .await
+            .context("remove_track")?;
         Ok(())
     }
 
@@ -287,7 +312,10 @@ impl HostPeer {
             .local_description()
             .await
             .ok_or_else(|| anyhow!("no local description after offer"))?;
-        self.send(&HostMessage::SdpOffer { sdp: serde_json::to_string(&local)? }).await?;
+        self.send(&HostMessage::SdpOffer {
+            sdp: serde_json::to_string(&local)?,
+        })
+        .await?;
         let answer = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
             .await
             .context("renegotiation answer timeout")?
@@ -380,8 +408,13 @@ impl ClientPeer {
                             return;
                         }
                         // ICE transport already established (BUNDLE); no gathering wait needed on renegotiation.
-                        let local = pc.local_description().await.expect("local description set above");
-                        let msg = ClientMessage::SdpAnswer { sdp: serde_json::to_string(&local).unwrap() };
+                        let local = pc
+                            .local_description()
+                            .await
+                            .expect("local description set above");
+                        let msg = ClientMessage::SdpAnswer {
+                            sdp: serde_json::to_string(&local).unwrap(),
+                        };
                         if let Err(e) = dc.send_text(serde_json::to_string(&msg).unwrap()).await {
                             warn!("send SdpAnswer: {e}");
                         }
@@ -419,12 +452,18 @@ impl ClientPeer {
     /// and a track arriving before registration is silently lost.
     pub fn on_track(&self, f: impl Fn(String, Arc<TrackRemote>) + Send + Sync + 'static) {
         let f = Arc::new(f);
-        self.pc.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver, _transceiver| {
-            let f = f.clone();
-            let key = if track.id().is_empty() { track.stream_id() } else { track.id() };
-            f(key, track);
-            Box::pin(async {})
-        }));
+        self.pc.on_track(Box::new(
+            move |track: Arc<TrackRemote>, _receiver, _transceiver| {
+                let f = f.clone();
+                let key = if track.id().is_empty() {
+                    track.stream_id()
+                } else {
+                    track.id()
+                };
+                f(key, track);
+                Box::pin(async {})
+            },
+        ));
     }
 
     pub fn on_host_message(&self, f: impl Fn(HostMessage) + Send + Sync + 'static) {
@@ -433,7 +472,10 @@ impl ClientPeer {
 
     pub async fn send(&self, msg: &ClientMessage) -> Result<()> {
         let json = serde_json::to_string(msg)?;
-        self.dc.send_text(json).await.context("send on data channel")?;
+        self.dc
+            .send_text(json)
+            .await
+            .context("send on data channel")?;
         Ok(())
     }
 
@@ -449,7 +491,10 @@ impl ClientPeer {
     /// the host's RTCP drain / `on_pli` callback path in the loopback test.
     pub async fn write_pli(&self, ssrc: u32) -> Result<()> {
         self.pc
-            .write_rtcp(&[Box::new(PictureLossIndication { sender_ssrc: 0, media_ssrc: ssrc })])
+            .write_rtcp(&[Box::new(PictureLossIndication {
+                sender_ssrc: 0,
+                media_ssrc: ssrc,
+            })])
             .await
             .context("write_rtcp PLI")?;
         Ok(())
@@ -461,8 +506,10 @@ mod tests {
     use super::*;
 
     fn dummy_answer() -> RTCSessionDescription {
-        RTCSessionDescription::answer("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string())
-            .unwrap()
+        RTCSessionDescription::answer(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
+        )
+        .unwrap()
     }
 
     // --- PendingAnswerQueue: plain, runtime-free tests against the exact
@@ -491,7 +538,10 @@ mod tests {
         // generation 2's entry — generation 1's was already discarded.
         let (next_gen, next_tx) = queue.pop().expect("generation 2 must still be queued");
         assert_eq!(next_gen, gen2, "a discarded generation must not resurface");
-        assert!(queue.pop().is_none(), "queue must be empty after popping the only entry");
+        assert!(
+            queue.pop().is_none(),
+            "queue must be empty after popping the only entry"
+        );
 
         // Routing succeeded (receiver not dropped): send returns Ok.
         assert!(next_tx.send(dummy_answer()).is_ok());
@@ -531,7 +581,9 @@ mod tests {
     fn sdp_with_mids(kind: &str, mids: &[&str]) -> RTCSessionDescription {
         let mut sdp = String::from("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n");
         for mid in mids {
-            sdp.push_str(&format!("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:{mid}\r\n"));
+            sdp.push_str(&format!(
+                "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:{mid}\r\n"
+            ));
         }
         match kind {
             "offer" => RTCSessionDescription::offer(sdp).unwrap(),

@@ -66,7 +66,13 @@ pub fn query_ax_meta(pids: &[i32]) -> HashMap<u32, AxWindowMeta> {
                                 bool::from(b)
                             })
                             .unwrap_or(false);
-                        out.insert(id, AxWindowMeta { role: AxRole::Window, minimized });
+                        out.insert(
+                            id,
+                            AxWindowMeta {
+                                role: AxRole::Window,
+                                minimized,
+                            },
+                        );
                     }
                     // Attached sheets are AXSheet children of the window, not AXWindows entries.
                     if let Some(children_ref) = copy_attr(win, kAXChildrenAttribute) {
@@ -84,7 +90,10 @@ pub fn query_ax_meta(pids: &[i32]) -> HashMap<u32, AxWindowMeta> {
                                 if let Some(id) = cgid_of(child) {
                                     out.insert(
                                         id,
-                                        AxWindowMeta { role: AxRole::Sheet, minimized: false },
+                                        AxWindowMeta {
+                                            role: AxRole::Sheet,
+                                            minimized: false,
+                                        },
                                     );
                                 }
                             }

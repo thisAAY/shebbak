@@ -72,7 +72,11 @@ impl SCStreamOutputTrait for FrameHandler {
             let start = row * bytes_per_row;
             data.extend_from_slice(&src[start..start + buf_w * 4]);
         }
-        (self.on_frame)(BgraFrame { width, height, data });
+        (self.on_frame)(BgraFrame {
+            width,
+            height,
+            data,
+        });
     }
 }
 
@@ -90,7 +94,12 @@ impl SckCapture {
             "capture size must be even, got {width_px}x{height_px}"
         );
         ensure_core_graphics_initialized();
-        Ok(Self { window_id, expected: Arc::new(Mutex::new((width_px, height_px))), fps, stream: None })
+        Ok(Self {
+            window_id,
+            expected: Arc::new(Mutex::new((width_px, height_px))),
+            fps,
+            stream: None,
+        })
     }
 }
 
@@ -114,7 +123,10 @@ impl WindowCapture for SckCapture {
 
         let mut stream = SCStream::new(&filter, &config);
         stream.add_output_handler(
-            FrameHandler { expected: self.expected.clone(), on_frame: Arc::from(on_frame) },
+            FrameHandler {
+                expected: self.expected.clone(),
+                on_frame: Arc::from(on_frame),
+            },
             SCStreamOutputType::Screen,
         );
         stream.start_capture().context("start_capture")?;
@@ -127,8 +139,14 @@ impl WindowCapture for SckCapture {
             width_px.is_multiple_of(2) && height_px.is_multiple_of(2),
             "capture size must be even, got {width_px}x{height_px}"
         );
-        anyhow::ensure!(width_px > 0 && height_px > 0, "capture size must be nonzero");
-        let stream = self.stream.as_ref().ok_or_else(|| anyhow!("capture not started"))?;
+        anyhow::ensure!(
+            width_px > 0 && height_px > 0,
+            "capture size must be nonzero"
+        );
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| anyhow!("capture not started"))?;
         let config = SCStreamConfiguration::new()
             .with_width(width_px)
             .with_height(height_px)
