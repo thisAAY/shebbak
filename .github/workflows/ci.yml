@@ -11,9 +11,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: macos-15
-    env:
-      MACOSX_DEPLOYMENT_TARGET: "14.6"
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
