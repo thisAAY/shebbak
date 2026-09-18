@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries for both targets
+        run: |
+          cargo build --release --workspace --target aarch64-apple-darwin
+          cargo build --release --workspace --target x86_64-apple-darwin
+      - name: Package archives
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            stage="shebbak-${GITHUB_REF_NAME}-${target}"
+            mkdir "$stage"
+            cp "target/${target}/release/srw-host" \
+               "target/${target}/release/srw-client" \
+               LICENSE README.md "$stage/"
+            tar -czf "${stage}.tar.gz" "$stage"
+          done
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: shebbak-*.tar.gz
