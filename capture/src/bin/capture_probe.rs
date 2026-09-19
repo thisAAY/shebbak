@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     let bytes = Arc::new(AtomicU64::new(0));
     let (c2, b2) = (count.clone(), bytes.clone());
     let mut cap = SckCapture::new(entry.info.id, w, h, 30)?;
-    cap.start(Box::new(move |frame| {
+    cap.start(Box::new(move |frame, _meta| {
         c2.fetch_add(1, Ordering::Relaxed);
         b2.store(frame.data.len() as u64, Ordering::Relaxed);
         // Cheap liveness signal: checksum of the first row.

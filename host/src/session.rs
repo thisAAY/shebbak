@@ -139,7 +139,7 @@ async fn open_track_window(
         }
     };
     let push_pipe = pipeline.clone();
-    if let Err(e) = capture.start(Box::new(move |frame| push_pipe.push(frame))) {
+    if let Err(e) = capture.start(Box::new(move |frame, _meta| push_pipe.push(frame))) {
         pipeline.stop();
         let _ = peer.remove_track(track_id).await;
         return Err(e);
@@ -197,7 +197,7 @@ fn restart_capture(
         }
     };
     let push_pipe = pipeline.clone();
-    if let Err(e) = new_capture.start(Box::new(move |frame| push_pipe.push(frame))) {
+    if let Err(e) = new_capture.start(Box::new(move |frame, _meta| push_pipe.push(frame))) {
         warn!("restore window {window_id}: capture start failed: {e:#}");
         return;
     }

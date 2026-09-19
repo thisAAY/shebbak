@@ -7,6 +7,7 @@ use screencapturekit::stream::content_filter::SCContentFilter;
 use screencapturekit::stream::output_trait::SCStreamOutputTrait;
 use screencapturekit::stream::output_type::SCStreamOutputType;
 use screencapturekit::stream::SCStream;
+use srw_core::mapping::FrameMeta;
 use srw_core::pixels::BgraFrame;
 use std::sync::{Arc, Mutex, Once};
 use tracing::warn;
@@ -27,7 +28,7 @@ fn ensure_core_graphics_initialized() {
 
 struct FrameHandler {
     expected: Arc<Mutex<(u32, u32)>>,
-    on_frame: Arc<dyn Fn(BgraFrame) + Send + Sync>,
+    on_frame: Arc<dyn Fn(BgraFrame, FrameMeta) + Send + Sync>,
 }
 
 impl SCStreamOutputTrait for FrameHandler {
@@ -66,6 +67,18 @@ impl SCStreamOutputTrait for FrameHandler {
             // Size mismatch (e.g. during teardown or a live reconfigure): drop.
             return;
         }
+        let meta = FrameMeta {
+            width_px: width,
+            height_px: height,
+            content_rect: sample_buffer
+                .content_rect()
+                .map(|r| (r.origin.x, r.origin.y, r.size.width, r.size.height)),
+            content_scale: sample_buffer.content_scale(),
+            scale_factor: sample_buffer.scale_factor(),
+            bounding_rect: sample_buffer
+                .bounding_rect()
+                .map(|r| (r.origin.x, r.origin.y, r.size.width, r.size.height)),
+        };
         let bytes_per_row = guard.bytes_per_row();
         // SAFETY: `src` is read and copied entirely within this call, before
         // the guard (and the lock it holds) is dropped at the end of scope.
@@ -79,11 +92,14 @@ impl SCStreamOutputTrait for FrameHandler {
             let start = row * bytes_per_row;
             data.extend_from_slice(&src[start..start + buf_w * 4]);
         }
-        (self.on_frame)(BgraFrame {
-            width,
-            height,
-            data,
-        });
+        (self.on_frame)(
+            BgraFrame {
+                width,
+                height,
+                data,
+            },
+            meta,
+        );
     }
 }
 
@@ -111,7 +127,7 @@ impl SckCapture {
 }
 
 impl WindowCapture for SckCapture {
-    fn start(&mut self, on_frame: Box<dyn Fn(BgraFrame) + Send + Sync>) -> Result<()> {
+    fn start(&mut self, on_frame: Box<dyn Fn(BgraFrame, FrameMeta) + Send + Sync>) -> Result<()> {
         let content = SCShareableContent::get()
             .context("SCShareableContent::get (needs Screen Recording permission)")?;
         let window = content
