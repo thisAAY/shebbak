@@ -5,3 +5,4 @@ pub mod app;
 pub mod bundle;
 pub mod ipc;
 pub mod net;
+pub mod router;
