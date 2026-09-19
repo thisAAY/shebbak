@@ -1,4 +1,4 @@
-use crate::classify::{classify, parent_for, parent_offset};
+use crate::classify::classify;
 use crate::model::{SnapshotWindow, WindowInfo};
 use crate::protocol::{WindowId, WindowKind};
 use std::collections::{HashMap, HashSet};
@@ -63,25 +63,14 @@ impl AppTracker {
             .into_iter()
             .filter(|w| self.pids.contains(&w.pid))
             .collect();
-        // A Transient window that's off screen (e.g. a dismissed menu whose
-        // NSWindow lingers in CGWindowList after being ordered out) is
-        // treated as not present at all: filtered out here so it can never
-        // freshly Open, and dropped from `now_ids` below so an already-live
-        // one gets Closed like any other vanished window. Normal/Sheet
-        // windows are unaffected — a minimized Normal window is legitimately
-        // off screen and must stay tracked. For a window we haven't seen
-        // before there's no `Tracked` entry yet, so its kind is classified
-        // the same way the Opens loop below would.
+        // Only Normal windows are tracked and announced. Sheet/Transient
+        // windows composite into their parent window's stream natively
+        // (SCK includesChildWindows), so they must never open tracks or
+        // emit events — classify() is the recognition seam that keeps a
+        // menu or sheet from ever being announced as a Normal window.
         let ours: Vec<SnapshotWindow> = ours
             .into_iter()
-            .filter(|w| {
-                let kind = self
-                    .live
-                    .get(&w.info.id)
-                    .map(|t| t.kind)
-                    .unwrap_or_else(|| classify(w.layer, w.ax_role));
-                kind != WindowKind::Transient || w.on_screen
-            })
+            .filter(|w| classify(w.layer, w.ax_role) == WindowKind::Normal)
             .collect();
         let now_ids: HashSet<WindowId> = ours.iter().map(|w| w.info.id).collect();
         let mut events = Vec::new();
@@ -103,18 +92,11 @@ impl AppTracker {
             if self.live.contains_key(&w.info.id) {
                 continue;
             }
-            let kind = classify(w.layer, w.ax_role);
-            let (parent_id, ox, oy) = if kind == WindowKind::Normal {
-                (None, 0.0, 0.0)
-            } else {
-                match parent_for(w, &ours) {
-                    Some(p) => {
-                        let (ox, oy) = parent_offset(&p.info, &w.info);
-                        (Some(p.info.id), ox, oy)
-                    }
-                    None => (None, 0.0, 0.0),
-                }
-            };
+            // Post-filter, every window here is Normal. The kind/parent/
+            // offset fields are vestigial and removed by the plumbing-
+            // removal task of the 2026-09-19 plan.
+            let kind = WindowKind::Normal;
+            let (parent_id, ox, oy) = (None, 0.0, 0.0);
             events.push(TrackerEvent::Opened {
                 window: w.clone(),
                 kind,
@@ -287,37 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn transient_opens_parented_to_frontmost_normal_with_offset() {
-        let mut t = AppTracker::new(&[100]);
-        t.diff(vec![normal(1, 100)]);
-        let menu = snap(
-            2,
-            100,
-            101,
-            AxRole::Unknown,
-            40.0,
-            60.0,
-            200.0,
-            300.0,
-            "",
-            false,
-        );
-        let ev = t.diff(vec![menu, normal(1, 100)]); // menu frontmost
-        match &ev[0] {
-            TrackerEvent::Opened {
-                kind: WindowKind::Transient,
-                parent_id: Some(1),
-                offset_x,
-                offset_y,
-                ..
-            } => {
-                assert_eq!((*offset_x, *offset_y), (30.0, 40.0)); // 40-10, 60-20
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
     fn gone_window_closes_and_can_reopen() {
         let mut t = AppTracker::new(&[100]);
         t.diff(vec![normal(1, 100)]);
@@ -446,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn title_change_fires_while_minimized_and_for_transients() {
+    fn title_change_fires_while_minimized() {
         let mut t = AppTracker::new(&[100]);
         t.diff(vec![normal(1, 100)]);
         // Minimize and change title
@@ -467,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_title_change_fires() {
+    fn sheet_and_transient_windows_emit_no_events() {
         let mut t = AppTracker::new(&[100]);
         t.diff(vec![normal(1, 100)]);
         let menu = snap(
@@ -479,81 +430,30 @@ mod tests {
             60.0,
             200.0,
             300.0,
-            "menu",
-            false,
-        );
-        t.diff(vec![menu, normal(1, 100)]);
-        // Transient title change
-        let menu_renamed = snap(
-            2,
-            100,
-            101,
-            AxRole::Unknown,
-            40.0,
-            60.0,
-            200.0,
-            300.0,
-            "menu renamed",
-            false,
-        );
-        let ev = t.diff(vec![menu_renamed, normal(1, 100)]);
-        assert!(
-            ev.contains(&TrackerEvent::TitleChanged {
-                window_id: 2,
-                title: "menu renamed".into()
-            }),
-            "TitleChanged must fire for transients, got {:?}",
-            ev
-        );
-    }
-
-    #[test]
-    fn dismissed_transient_going_off_screen_closes() {
-        let mut t = AppTracker::new(&[100]);
-        t.diff(vec![normal(1, 100)]);
-        let mut menu = snap(
-            2,
-            100,
-            101,
-            AxRole::Unknown,
-            40.0,
-            60.0,
-            200.0,
-            300.0,
             "",
             false,
         );
-        t.diff(vec![menu.clone(), normal(1, 100)]); // menu opens on screen
-                                                    // Menu dismissed: NSWindow lingers in CGWindowList but ordered out.
-        menu.on_screen = false;
-        let ev = t.diff(vec![menu, normal(1, 100)]);
-        assert_eq!(ev, vec![TrackerEvent::Closed { window_id: 2 }]);
-    }
-
-    #[test]
-    fn new_transient_already_off_screen_does_not_open() {
-        let mut t = AppTracker::new(&[100]);
-        t.diff(vec![normal(1, 100)]);
-        let mut menu = snap(
-            2,
+        let sheet = snap(
+            3,
             100,
-            101,
-            AxRole::Unknown,
+            0,
+            AxRole::Sheet,
             40.0,
             60.0,
+            400.0,
             200.0,
-            300.0,
-            "",
+            "sheet",
             false,
         );
-        menu.on_screen = false;
-        let ev = t.diff(vec![menu, normal(1, 100)]);
-        assert!(
-            ev.is_empty(),
-            "off-screen transient must never open, got {:?}",
-            ev
-        );
+        // Appearing emits nothing and they are never tracked.
+        let ev = t.diff(vec![menu.clone(), sheet.clone(), normal(1, 100)]);
+        assert!(ev.is_empty(), "no events for transient/sheet, got {ev:?}");
         assert_eq!(t.kind_of(2), None);
+        assert_eq!(t.kind_of(3), None);
+        assert!(!t.pid_map().contains_key(&2));
+        // Disappearing emits nothing either (they were never live).
+        let ev = t.diff(vec![normal(1, 100)]);
+        assert!(ev.is_empty(), "no Closed for transient/sheet, got {ev:?}");
     }
 
     #[test]
