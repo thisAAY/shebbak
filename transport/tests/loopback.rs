@@ -1,4 +1,3 @@
-use srw_core::blit::{chunk_blit, BlitAssembler};
 use srw_core::protocol::{ClientMessage, HostMessage};
 use srw_transport::peer::{ClientPeer, HostPeer};
 use std::time::Duration;
@@ -114,26 +113,31 @@ async fn peer_v2_runtime_tracks_renegotiation_and_pli() {
         .expect("pli channel closed");
     assert_eq!(pli_track_id, "win-1");
 
-    // 7. Blit roundtrip over the control channel, reassembled client-side.
-    let payload = vec![0x42u8; 40_000];
-    for msg in chunk_blit(7, 1, &payload) {
-        host.send(&msg).await.unwrap();
-    }
-    let mut assembler = BlitAssembler::new();
-    let reassembled = tokio::time::timeout(Duration::from_secs(5), async {
+    // 7. Control-channel host→client roundtrip of the InputMapping message
+    // (the change-triggered pointer transform that replaced blits).
+    let mapping_msg = HostMessage::InputMapping {
+        window_id: 7,
+        scale_x: 7.0 / 6.0,
+        scale_y: 7.0 / 6.0,
+        offset_x: -66.0,
+        offset_y: -100.0,
+    };
+    host.send(&mapping_msg).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let msg = client_msg_rx
+            let m = client_msg_rx
                 .recv()
                 .await
                 .expect("client message channel closed");
-            if let Some(result) = assembler.push(&msg) {
-                return result;
+            // Skip the step-2 channel-open probe (WindowClosed { 0 }).
+            if !matches!(m, HostMessage::WindowClosed { .. }) {
+                return m;
             }
         }
     })
     .await
-    .expect("timed out waiting for blit reassembly");
-    assert_eq!(reassembled, (7, payload));
+    .expect("timed out waiting for InputMapping");
+    assert_eq!(got, mapping_msg);
 
     // 8. Runtime track remove, then renegotiate again; must not error.
     host.remove_track("win-1").await.unwrap();

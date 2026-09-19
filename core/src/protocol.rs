@@ -57,13 +57,6 @@ pub enum HostMessage {
         offset_x: f64,
         offset_y: f64,
     },
-    TransientBlit {
-        window_id: WindowId,
-        seq: u32,
-        chunk_index: u16,
-        chunk_count: u16,
-        data_b64: String,
-    },
     SdpOffer {
         sdp: String,
     },
@@ -176,13 +169,6 @@ mod tests {
                 scale_y: 7.0 / 6.0,
                 offset_x: -66.67,
                 offset_y: -100.0,
-            },
-            HostMessage::TransientBlit {
-                window_id: 43,
-                seq: 7,
-                chunk_index: 0,
-                chunk_count: 3,
-                data_b64: "aGVsbG8=".into(),
             },
             HostMessage::SdpOffer {
                 sdp: "{\"type\":\"offer\"}".into(),

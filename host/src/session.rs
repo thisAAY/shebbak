@@ -18,25 +18,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-use crate::blit;
 use crate::pipeline::Pipeline;
 
 const SIGNAL_PORT: u16 = 9009;
 const RECONCILE_MS: u64 = 500;
 
-/// Per-window runtime state. `Track` windows (Normal/Sheet) get a media track
-/// plus encoder pipeline and capture; `Transient` windows are announced but
-/// their pixels ride the control channel as blits, driven by the loop
-/// `blit` started in the `Opened` arm (`stop` is that loop's shutdown flag).
-enum WindowRuntime {
-    Track {
-        pipeline: Arc<Pipeline>,
-        capture: Option<Box<dyn WindowCapture>>,
-        track_id: String,
-    },
-    Blit {
-        stop: Option<Arc<AtomicBool>>,
-    },
+/// Per-window runtime state: a media track plus encoder pipeline and the
+/// capture pushing into it. Child windows (menus, sheets, popovers) have
+/// no runtime of their own — SCK composites them into the parent's frames.
+struct WindowRuntime {
+    pipeline: Arc<Pipeline>,
+    capture: Option<Box<dyn WindowCapture>>,
+    track_id: String,
 }
 
 type RuntimeMap = HashMap<WindowId, WindowRuntime>;
@@ -81,21 +74,10 @@ fn local_lan_ip() -> Option<std::net::IpAddr> {
 }
 
 fn teardown_runtime(rt: WindowRuntime) {
-    match rt {
-        WindowRuntime::Track {
-            pipeline, capture, ..
-        } => {
-            if let Some(mut c) = capture {
-                c.stop();
-            }
-            pipeline.stop();
-        }
-        WindowRuntime::Blit { stop } => {
-            if let Some(flag) = stop {
-                flag.store(true, Ordering::SeqCst);
-            }
-        }
+    if let Some(mut c) = rt.capture {
+        c.stop();
     }
+    rt.pipeline.stop();
 }
 
 /// Adds a track, starts its encoder pipeline, and starts a capture pushing
@@ -176,7 +158,7 @@ async fn open_track_window(
         .insert(track_id.to_string(), pipeline.clone());
     runtimes.insert(
         window.info.id,
-        WindowRuntime::Track {
+        WindowRuntime {
             pipeline,
             capture: Some(capture),
             track_id: track_id.to_string(),
@@ -197,7 +179,7 @@ fn restart_capture(
     runtimes: &mut RuntimeMap,
     meta_tx: &MetaSender,
 ) {
-    let Some(WindowRuntime::Track {
+    let Some(WindowRuntime {
         pipeline, capture, ..
     }) = runtimes.get_mut(&window_id)
     else {
@@ -607,40 +589,22 @@ async fn run_session_body(
                     if let Err(e) = peer.send(&msg).await {
                         warn!("send WindowOpened: {e}");
                     }
-                    if kind == WindowKind::Transient {
-                        // Started AFTER WindowOpened: the client should know the
-                        // window exists before pixels arrive, though it buffers
-                        // early blits regardless (mirroring `early_frames`).
-                        runtimes.insert(
-                            window.info.id,
-                            WindowRuntime::Blit {
-                                stop: Some(blit::start_blit(
-                                    window.info.id,
-                                    peer.clone(),
-                                    rt.clone(),
-                                )),
-                            },
-                        );
-                    }
                 }
                 TrackerEvent::Closed { window_id } => {
                     if let Some(rt_entry) = runtimes.remove(&window_id) {
-                        if let WindowRuntime::Track { ref track_id, .. } = rt_entry {
-                            pli_pipelines.lock().unwrap().remove(track_id);
-                            if let Err(e) = peer.remove_track(track_id).await {
-                                warn!("remove_track: {e}");
-                            }
-                            tracks_changed = true;
+                        pli_pipelines.lock().unwrap().remove(&rt_entry.track_id);
+                        if let Err(e) = peer.remove_track(&rt_entry.track_id).await {
+                            warn!("remove_track: {e}");
                         }
+                        tracks_changed = true;
                         teardown_runtime(rt_entry);
                     }
                     let _ = peer.send(&HostMessage::WindowClosed { window_id }).await;
                 }
                 TrackerEvent::Minimized { window_id } => {
-                    if let Some(WindowRuntime::Track { capture, .. }) = runtimes.get_mut(&window_id)
-                    {
+                    if let Some(rt_entry) = runtimes.get_mut(&window_id) {
                         // Pause: drop the capture, keep the pipeline + track alive.
-                        if let Some(mut c) = capture.take() {
+                        if let Some(mut c) = rt_entry.capture.take() {
                             c.stop();
                         }
                     }
@@ -655,7 +619,7 @@ async fn run_session_body(
                     width,
                     height,
                 } => {
-                    if let Some(WindowRuntime::Track {
+                    if let Some(WindowRuntime {
                         capture: Some(c), ..
                     }) = runtimes.get_mut(&window_id)
                     {

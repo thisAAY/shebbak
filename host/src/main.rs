@@ -1,4 +1,3 @@
-mod blit;
 mod pipeline;
 mod session;
 
@@ -35,7 +34,7 @@ async fn main() -> Result<()> {
 
     // List apps and pick one or more to share, by pid. `SRW_SHARE_PIDS`
     // (comma-separated pids) skips the interactive prompt for scripting
-    // (e.g. scripts/menu_blit_test.sh) and reconnect testing.
+    // and reconnect testing.
     let pids: Vec<i32> = if let Ok(raw) = std::env::var("SRW_SHARE_PIDS") {
         let pids: Vec<i32> = raw
             .split(',')
