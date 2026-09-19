@@ -328,6 +328,9 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
                                 ClientMessage::CloseRequest { window_id } => {
                                     sink.close_window(window_id)
                                 }
+                                // Session-level message; rerouted before the
+                                // worker in Task 4. Never input.
+                                ClientMessage::UnsubscribeApp { .. } => Ok(()),
                                 // Consumed inside HostPeer's dispatch — never reaches here.
                                 ClientMessage::SdpAnswer { .. } => Ok(()),
                             };
@@ -563,6 +566,7 @@ async fn run_session_body(
                         width: window.info.width,
                         height: window.info.height,
                         track_id,
+                        app_id: window.pid,
                     };
                     if let Err(e) = peer.send(&msg).await {
                         warn!("send WindowOpened: {e}");

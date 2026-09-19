@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Host-side window identifier (CGWindowID on macOS).
 pub type WindowId = u32;
 
+/// Host-side application identifier: the shared app's pid (stable per session).
+pub type AppId = i32;
+
 /// Host → client messages on the control data channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -13,6 +16,7 @@ pub enum HostMessage {
         width: f64,
         height: f64,
         track_id: String,
+        app_id: AppId,
     },
     WindowResized {
         window_id: WindowId,
@@ -43,6 +47,14 @@ pub enum HostMessage {
         scale_y: f64,
         offset_x: f64,
         offset_y: f64,
+    },
+    /// Sent once per shared app, before its first `WindowOpened`.
+    /// `icon_png` is base64 PNG at up to 256 px; empty when the host app
+    /// has no usable icon.
+    AppAnnounced {
+        app_id: AppId,
+        name: String,
+        icon_png: String,
     },
     SdpOffer {
         sdp: String,
@@ -81,6 +93,11 @@ pub enum ClientMessage {
     },
     CloseRequest {
         window_id: WindowId,
+    },
+    /// Stop mirroring this app: remove its tracks and encode pipelines.
+    /// The host app itself is untouched.
+    UnsubscribeApp {
+        app_id: AppId,
     },
     SdpAnswer {
         sdp: String,
@@ -122,6 +139,7 @@ mod tests {
                 width: 800.0,
                 height: 600.0,
                 track_id: "win-42".into(),
+                app_id: 501,
             },
             HostMessage::WindowResized {
                 window_id: 42,
@@ -144,6 +162,11 @@ mod tests {
             },
             HostMessage::SdpOffer {
                 sdp: "{\"type\":\"offer\"}".into(),
+            },
+            HostMessage::AppAnnounced {
+                app_id: 501,
+                name: "Safari".into(),
+                icon_png: "aGVsbG8=".into(),
             },
         ];
         for m in msgs {
@@ -182,6 +205,7 @@ mod tests {
             ClientMessage::SdpAnswer {
                 sdp: "{\"type\":\"answer\"}".into(),
             },
+            ClientMessage::UnsubscribeApp { app_id: 501 },
         ];
         for m in msgs {
             assert_eq!(roundtrip_client(m.clone()), m);
@@ -203,5 +227,21 @@ mod tests {
             json,
             r#"{"type":"KeyEvent","window_id":7,"key_code":12,"down":false,"flags":0}"#
         );
+    }
+
+    #[test]
+    fn app_identity_wire_format_is_stable_v3() {
+        let json = serde_json::to_string(&HostMessage::AppAnnounced {
+            app_id: 7,
+            name: "Safari".into(),
+            icon_png: String::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"AppAnnounced","app_id":7,"name":"Safari","icon_png":""}"#
+        );
+        let json = serde_json::to_string(&ClientMessage::UnsubscribeApp { app_id: 7 }).unwrap();
+        assert_eq!(json, r#"{"type":"UnsubscribeApp","app_id":7}"#);
     }
 }

@@ -117,6 +117,7 @@ impl App {
                     width,
                     height,
                     track_id,
+                    app_id: _,
                 }) => {
                     let ann = OpenedWindow {
                         info: WindowInfo {
@@ -213,6 +214,10 @@ impl App {
                     if let Some(m) = self.mirror_for_remote(window_id) {
                         m.mapping = mapping;
                     }
+                }
+                UiEvent::Host(HostMessage::AppAnnounced { .. }) => {
+                    // Routed to mirror helpers once the coordinator split
+                    // lands (Task 11); the single-process client ignores it.
                 }
                 UiEvent::Host(HostMessage::SdpOffer { .. }) => {
                     // Consumed inside ClientPeer itself and never forwarded
