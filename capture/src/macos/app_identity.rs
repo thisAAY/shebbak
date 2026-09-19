@@ -74,6 +74,12 @@ fn png_at(icon: &NSImage, side: f64) -> Option<Vec<u8>> {
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&target_rep)?;
         let cg_context = context.CGContext();
         let draw_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
+        // initWithBitmapDataPlanes_ with a null planes pointer has the rep
+        // allocate its own buffer, but that allocation isn't guaranteed to
+        // be zero-filled. Clear it explicitly before compositing so stale
+        // memory can't show through the transparent corners of rounded
+        // (post-Big Sur) app icons.
+        objc2_core_graphics::CGContext::clear_rect(Some(&cg_context), draw_rect);
         objc2_core_graphics::CGContext::draw_image(Some(&cg_context), draw_rect, Some(&source_cg));
 
         let data = target_rep
