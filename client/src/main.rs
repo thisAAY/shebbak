@@ -1,5 +1,4 @@
-mod app;
-mod net;
+use srw_client::{app, net};
 
 use anyhow::Result;
 use winit::event_loop::EventLoop;
