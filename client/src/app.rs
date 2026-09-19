@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
@@ -463,7 +463,21 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 if let Some(m) = self.mirrors.get_mut(&wid) {
+                    // Repaint at the current backing size. macOS emits Resized
+                    // (and ScaleFactorChanged) right after a window is created
+                    // and again once its scale settles; a mirror is created
+                    // with_active(false) and never focused, so if its first
+                    // paint landed at the wrong scale (video confined to a
+                    // half-size corner, black around it) nothing else would
+                    // repaint it — the user had to resize the window by hand.
+                    // Redrawing on the automatic Resized/ScaleFactorChanged
+                    // events macOS already delivers makes it self-correct.
+                    m.window.request_redraw();
                     let scale = m.window.scale_factor();
+                    debug!(
+                        "mirror {} resized -> {}x{}px @scale {scale}",
+                        m.remote_id, size.width, size.height
+                    );
                     let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
                     // Echo guard: host-initiated resizes come back through
                     // `last_host_size`, so only a genuine client-side
@@ -486,6 +500,16 @@ impl ApplicationHandler for App {
                             },
                         );
                     }
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // The backing scale settled (or the window moved to a display
+                // with a different scale). Repaint so the surface is rebuilt at
+                // the correct device-pixel size instead of persisting a
+                // wrong-scale first paint until a manual resize. See Resized.
+                if let Some(m) = self.mirrors.get(&wid) {
+                    debug!("mirror {} scale factor -> {scale_factor}", m.remote_id);
+                    m.window.request_redraw();
                 }
             }
             WindowEvent::CloseRequested => {

@@ -4,8 +4,10 @@ use srw_core::protocol::{ClientMessage, HostMessage};
 use srw_transport::codec::H264Decoder;
 use srw_transport::peer::ClientPeer;
 use srw_transport::signalling::post_offer;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use webrtc::media::io::sample_builder::SampleBuilder;
 use webrtc::rtp::codecs::h264::H264Packet;
@@ -69,6 +71,7 @@ pub fn connect(
         let ui = ui_tx.clone();
         let wake = wake.clone();
         let rt_handle = rt.handle().clone();
+        let peer_for_tracks = peer.clone();
         peer.on_track(move |track_id, track| {
             info!("track arrived: {track_id}");
             let _ = ui.send(UiEvent::TrackOpened {
@@ -77,7 +80,8 @@ pub fn connect(
             wake();
             let ui = ui.clone();
             let wake = wake.clone();
-            rt_handle.spawn(read_track(track_id, track, ui, wake));
+            let peer = peer_for_tracks.clone();
+            rt_handle.spawn(read_track(track_id, track, ui, wake, peer));
         });
     }
 
@@ -119,6 +123,7 @@ async fn read_track(
     track: Arc<TrackRemote>,
     ui: Sender<UiEvent>,
     wake: impl Fn() + Send + Sync + 'static,
+    peer: Arc<ClientPeer>,
 ) {
     let mut builder = SampleBuilder::new(512, H264Packet::default(), 90000)
         .with_max_time_delay(std::time::Duration::from_millis(500));
@@ -129,6 +134,40 @@ async fn read_track(
             return;
         }
     };
+
+    // Keyframe requester. H.264 decoding cannot start until an IDR arrives,
+    // and the host only forces one on a PLI (see host on_pli -> request_idr).
+    // A track we start reading after the host's initial IDR would otherwise
+    // never decode — staying blank until an unrelated renegotiation or
+    // capture reconfigure happened to emit a fresh keyframe. So we send a PLI
+    // on join and keep asking (once/sec) whenever the stream is stalled — no
+    // successful decode yet, or none in the last ~1.2s (packet loss). This is
+    // also the loss-recovery path the acceptance soak relies on.
+    let start = Instant::now();
+    let last_decode_ms = Arc::new(AtomicU64::new(0)); // 0 = nothing decoded yet
+    let alive = Arc::new(AtomicBool::new(true));
+    {
+        let peer = peer.clone();
+        let ssrc = track.ssrc();
+        let last_decode_ms = last_decode_ms.clone();
+        let alive = alive.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await; // first tick fires immediately -> PLI on join
+                if !alive.load(Ordering::Relaxed) {
+                    return; // track ended; stop asking for a dead ssrc
+                }
+                let now_ms = start.elapsed().as_millis() as u64;
+                let last = last_decode_ms.load(Ordering::Relaxed);
+                let stalled = last == 0 || now_ms.saturating_sub(last) > 1200;
+                if stalled && peer.write_pli(ssrc).await.is_err() {
+                    return; // peer gone
+                }
+            }
+        });
+    }
+
     // Rate-limit decode-error spam (a bad GOP can produce one per frame): log
     // at most once per second per track, folding the rest into a count.
     let mut suppressed: u32 = 0;
@@ -138,6 +177,7 @@ async fn read_track(
             Ok(p) => p,
             Err(e) => {
                 warn!("{track_id}: track ended: {e}");
+                alive.store(false, Ordering::Relaxed); // stop the PLI requester
                 return;
             }
         };
@@ -145,6 +185,9 @@ async fn read_track(
         while let Some(sample) = builder.pop() {
             match decoder.decode(&sample.data) {
                 Ok(Some(frame)) => {
+                    // Mark progress so the keyframe requester stops asking
+                    // (and treats a later gap as a stall worth a fresh PLI).
+                    last_decode_ms.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
                     let _ = ui.send(UiEvent::TrackFrame {
                         track_id: track_id.clone(),
                         frame,
