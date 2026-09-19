@@ -171,6 +171,24 @@ impl AppTracker {
     pub fn pid_map(&self) -> HashMap<WindowId, i32> {
         self.live.iter().map(|(id, t)| (*id, t.pid)).collect()
     }
+
+    /// Stops tracking `pid` (client unsubscribed the app): removes it from
+    /// the shared set and forgets its live windows. Returns the forgotten
+    /// window ids so the session can tear down their tracks. No `Closed`
+    /// events are emitted — the client side that displayed them is gone.
+    pub fn remove_pid(&mut self, pid: i32) -> Vec<WindowId> {
+        self.pids.remove(&pid);
+        let ids: Vec<WindowId> = self
+            .live
+            .iter()
+            .filter(|(_, t)| t.pid == pid)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ids {
+            self.live.remove(id);
+        }
+        ids
+    }
 }
 
 #[cfg(test)]
@@ -479,5 +497,36 @@ mod tests {
                 height: 700.0
             }
         );
+    }
+
+    #[test]
+    fn remove_pid_forgets_its_windows_and_returns_their_ids() {
+        let mut t = AppTracker::new(&[100, 200]);
+        t.diff(vec![normal(1, 100), normal(2, 100), normal(3, 200)]);
+        let mut removed = t.remove_pid(100);
+        removed.sort_unstable();
+        assert_eq!(removed, vec![1, 2]);
+        // The other app is untouched.
+        assert!(t.geometry(3).is_some());
+        assert!(t.geometry(1).is_none());
+    }
+
+    #[test]
+    fn removed_pid_windows_emit_no_events_afterwards() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        t.remove_pid(100);
+        // The window is still on screen on the host, but the pid is no
+        // longer shared: no Opened (re-add), no Closed (already forgotten).
+        assert!(t.diff(vec![normal(1, 100)]).is_empty());
+        assert!(t.diff(vec![]).is_empty());
+    }
+
+    #[test]
+    fn remove_unknown_pid_is_a_no_op() {
+        let mut t = AppTracker::new(&[100]);
+        t.diff(vec![normal(1, 100)]);
+        assert!(t.remove_pid(999).is_empty());
+        assert!(t.geometry(1).is_some());
     }
 }
