@@ -3,6 +3,8 @@
 
 pub mod app;
 pub mod bundle;
+pub mod dock;
 pub mod ipc;
+pub mod mirror_app;
 pub mod net;
 pub mod router;
