@@ -429,9 +429,25 @@ impl HelperManager {
                 let _ = self.to_host.send(ClientMessage::UnsubscribeApp { app_id });
             }
             ExitAction::Reap => {
-                info!("app {app_id} ('{}') idle; helper reaped", state.name);
-                // Windows are already gone (that's why it idled); state
-                // stays for an on-demand respawn.
+                if state.windows.is_empty() {
+                    info!("app {app_id} ('{}') idle; helper reaped", state.name);
+                    // Windows are already gone (that's why it idled); state
+                    // stays for an on-demand respawn.
+                } else {
+                    // Exit race: a WindowOpened landed on the (stale)
+                    // running helper after it began idle-exiting, before
+                    // this HelperExited was processed — that window was
+                    // recorded and its track routed to a now-dead channel.
+                    // Revive immediately so it isn't stranded forever.
+                    info!(
+                        "app {app_id} ('{}') idle-exited but windows reappeared \
+                         during the exit race; reviving",
+                        state.name
+                    );
+                    if let Err(e) = self.spawn_and_replay(app_id) {
+                        error!("revive after idle-exit race for app {app_id}: {e:#}");
+                    }
+                }
             }
             ExitAction::Respawn => {
                 warn!(
@@ -512,7 +528,22 @@ impl HelperManager {
         // (CLOEXEC) closes at exec, and the parent's copy drops below.
         unsafe {
             cmd.pre_exec(move || {
-                if libc::dup2(fd, HELPER_FD) == -1 {
+                if fd == HELPER_FD {
+                    // dup2(fd, fd) is a POSIX no-op: it does NOT clear
+                    // FD_CLOEXEC. If the socketpair fd already landed on
+                    // HELPER_FD, dup2 would silently leave CLOEXEC set,
+                    // the fd would close at exec, and the helper would
+                    // see instant EOF and exit 0 (misread by the
+                    // coordinator as a user-initiated quit). Clear
+                    // CLOEXEC directly instead.
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(fd, HELPER_FD) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())

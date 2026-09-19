@@ -29,7 +29,18 @@ fn helper_probe_acks_window_lifecycle_over_socketpair() {
     cmd.env("SRW_MIRROR_PROBE", "1");
     unsafe {
         cmd.pre_exec(move || {
-            if libc::dup2(fd, HELPER_FD) == -1 {
+            if fd == HELPER_FD {
+                // dup2(fd, fd) is a POSIX no-op and would leave CLOEXEC
+                // set, closing the fd at exec — see coordinator.rs's
+                // spawn() for the full explanation. Clear it directly.
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(fd, HELPER_FD) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
