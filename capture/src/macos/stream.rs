@@ -42,6 +42,13 @@ impl SCStreamOutputTrait for FrameHandler {
                 return;
             }
         }
+        tracing::trace!(
+            content_rect = ?sample_buffer.content_rect(),
+            content_scale = ?sample_buffer.content_scale(),
+            scale_factor = ?sample_buffer.scale_factor(),
+            bounding_rect = ?sample_buffer.bounding_rect(),
+            "frame metadata"
+        );
         let Some(pixel_buffer) = sample_buffer.pixel_buffer() else {
             return;
         };
@@ -119,7 +126,10 @@ impl WindowCapture for SckCapture {
             .with_width(width)
             .with_height(height)
             .with_pixel_format(PixelFormat::BGRA)
-            .with_fps(self.fps);
+            .with_fps(self.fps)
+            // Deliberate, not an OS default: child windows (menus, sheets,
+            // popovers) composite into this window's frames (macOS 14.2+).
+            .with_includes_child_windows(true);
 
         let mut stream = SCStream::new(&filter, &config);
         stream.add_output_handler(
@@ -151,7 +161,10 @@ impl WindowCapture for SckCapture {
             .with_width(width_px)
             .with_height(height_px)
             .with_pixel_format(PixelFormat::BGRA)
-            .with_fps(self.fps);
+            .with_fps(self.fps)
+            // Deliberate, not an OS default: child windows (menus, sheets,
+            // popovers) composite into this window's frames (macOS 14.2+).
+            .with_includes_child_windows(true);
         stream
             .update_configuration(&config)
             .map_err(|e| anyhow!("update_configuration: {e}"))?;

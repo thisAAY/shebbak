@@ -2862,6 +2862,7 @@ dependencies = [
  "screencapturekit",
  "srw-core",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
