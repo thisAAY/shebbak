@@ -1,5 +1,6 @@
 use crate::net::{send_client_msg, Net, UiEvent};
 use softbuffer::{Context, Surface};
+use srw_core::mapping::InputMapping;
 use srw_core::model::{OpenedWindow, TrackBinder, WindowInfo};
 use srw_core::pixels::{BgraFrame, RgbaImage};
 use srw_core::protocol::{
@@ -82,6 +83,9 @@ pub struct Mirror {
     /// Last time a `MouseMove` was sent for this mirror — coalesces
     /// `CursorMoved` down to ~60 Hz instead of forwarding every event.
     last_move_sent: Instant,
+    /// Pointer-coordinate transform for the current stream state — identity
+    /// except while an oversized child window letterboxes the frame.
+    mapping: InputMapping,
 }
 
 pub struct App {
@@ -219,9 +223,21 @@ impl App {
                     info!("host closed window {window_id}");
                     self.destroy_mirror_by_remote(window_id);
                 }
-                UiEvent::Host(HostMessage::InputMapping { .. }) => {
-                    // Wired to Mirror.mapping in the client task of the
-                    // 2026-09-19 native-compositing plan.
+                UiEvent::Host(HostMessage::InputMapping {
+                    window_id,
+                    scale_x,
+                    scale_y,
+                    offset_x,
+                    offset_y,
+                }) => {
+                    if let Some(m) = self.mirror_for_remote(window_id) {
+                        m.mapping = InputMapping {
+                            scale_x,
+                            scale_y,
+                            offset_x,
+                            offset_y,
+                        };
+                    }
                 }
                 UiEvent::Host(HostMessage::TransientBlit { .. } | HostMessage::SdpOffer { .. }) => {
                     // TransientBlit: net.rs's BlitAssembler intercepts these
@@ -346,6 +362,7 @@ impl App {
             last_host_size: (ann.info.width, ann.info.height),
             cursor: PhysicalPosition::new(0.0, 0.0),
             last_move_sent: Instant::now(),
+            mapping: InputMapping::IDENTITY,
         };
         mirror.window.request_redraw();
         self.mirrors.insert(wid, mirror);
@@ -512,12 +529,13 @@ impl ApplicationHandler for App {
                     if m.last_move_sent.elapsed() >= Duration::from_millis(16) {
                         m.last_move_sent = Instant::now();
                         let scale = m.window.scale_factor();
+                        let (x, y) = m.mapping.apply(position.x / scale, position.y / scale);
                         send_client_msg(
                             &self.net,
                             ClientMessage::MouseMove {
                                 window_id: m.remote_id,
-                                x: position.x / scale,
-                                y: position.y / scale,
+                                x,
+                                y,
                             },
                         );
                     }
@@ -549,10 +567,11 @@ impl ApplicationHandler for App {
                     ElementState::Released => MouseAction::Up,
                 };
                 let scale = m.window.scale_factor();
+                let (x, y) = m.mapping.apply(m.cursor.x / scale, m.cursor.y / scale);
                 let msg = ClientMessage::MouseInput {
                     window_id: m.remote_id,
-                    x: m.cursor.x / scale,
-                    y: m.cursor.y / scale,
+                    x,
+                    y,
                     button,
                     action,
                 };
