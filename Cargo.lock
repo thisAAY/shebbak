@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "srw-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accessibility-sys",
  "anyhow",
@@ -2974,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "srw-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2998,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "srw-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "srw-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3023,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "srw-input"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accessibility-sys",
  "anyhow",
@@ -3035,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "srw-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "openh264",
