@@ -57,6 +57,91 @@ fn hook_disconnect(pc: &Arc<RTCPeerConnection>, f: impl Fn() + Send + Sync + 'st
     }));
 }
 
+/// webrtc-rs SCTP rejects any single data-channel message over 64 KiB
+/// (`DEFAULT_MAX_MESSAGE_SIZE`, not configurable through the public API), and
+/// renegotiation SDP grows ~3 KB per shared window, so control messages above
+/// this threshold are split into `WireEnvelope::Chunk` frames and reassembled
+/// on the other side. Kept well under the cap to leave room for the envelope.
+const CHUNK_PAYLOAD_BYTES: usize = 16 * 1024;
+
+/// Transport-private framing that rides the same data channel as
+/// `HostMessage`/`ClientMessage`. Internally tagged with the same `type` key,
+/// but the `__chunk` tag can never collide with a protocol variant name, so
+/// each side can try this parse first and fall through to the real message.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+enum WireEnvelope {
+    #[serde(rename = "__chunk")]
+    Chunk { seq: u32, last: bool, data: String },
+}
+
+/// Sends `json` on the channel, splitting it into chunk envelopes when it
+/// wouldn't fit in a single SCTP message. The channel is ordered and
+/// reliable, so chunks arrive in sequence and reassembly needs no ids.
+async fn send_text_chunked(ch: &Arc<RTCDataChannel>, json: String) -> Result<()> {
+    if json.len() <= CHUNK_PAYLOAD_BYTES {
+        ch.send_text(json).await.context("send on data channel")?;
+        return Ok(());
+    }
+    let mut rest = json.as_str();
+    let mut seq = 0u32;
+    while !rest.is_empty() {
+        let mut cut = CHUNK_PAYLOAD_BYTES.min(rest.len());
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (head, tail) = rest.split_at(cut);
+        rest = tail;
+        let frame = serde_json::to_string(&WireEnvelope::Chunk {
+            seq,
+            last: rest.is_empty(),
+            data: head.to_owned(),
+        })?;
+        ch.send_text(frame).await.context("send on data channel")?;
+        seq += 1;
+    }
+    Ok(())
+}
+
+/// Reassembles `WireEnvelope::Chunk` frames back into the original message.
+/// Non-chunk frames pass through untouched. A sequence gap (only possible if
+/// the sender restarted a message mid-flight) drops the partial buffer rather
+/// than deliver a corrupted splice.
+#[derive(Default)]
+struct ChunkAssembler {
+    buf: String,
+    next_seq: u32,
+}
+
+impl ChunkAssembler {
+    /// Returns a complete message (reassembled or passed through), or None
+    /// while more chunks are pending.
+    fn push(&mut self, raw: &[u8]) -> Option<Vec<u8>> {
+        let Ok(WireEnvelope::Chunk { seq, last, data }) = serde_json::from_slice(raw) else {
+            return Some(raw.to_vec());
+        };
+        if seq != self.next_seq {
+            warn!(
+                "chunk sequence gap (expected {}, got {seq}); dropping partial message",
+                self.next_seq
+            );
+            self.buf.clear();
+            self.next_seq = 0;
+            if seq != 0 {
+                return None;
+            }
+        }
+        self.buf.push_str(&data);
+        self.next_seq += 1;
+        if last {
+            self.next_seq = 0;
+            Some(std::mem::take(&mut self.buf).into_bytes())
+        } else {
+            None
+        }
+    }
+}
+
 async fn send_json<T: serde::Serialize>(
     dc: &Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     msg: &T,
@@ -67,8 +152,7 @@ async fn send_json<T: serde::Serialize>(
         .clone()
         .ok_or_else(|| anyhow!("data channel not open"))?;
     let json = serde_json::to_string(msg)?;
-    ch.send_text(json).await.context("send on data channel")?;
-    Ok(())
+    send_text_chunked(&ch, json).await
 }
 
 /// The ordered (media type, mid) pairs across an SDP's media sections, used to
@@ -190,9 +274,13 @@ impl HostPeer {
             Box::pin(async move {
                 let handler_slot = on_msg_slot.clone();
                 let pending_answers_slot = pending_answers_slot.clone();
+                let assembler = Arc::new(Mutex::new(ChunkAssembler::default()));
                 ch.on_message(Box::new(move |m: DataChannelMessage| {
+                    let Some(data) = assembler.lock().unwrap().push(&m.data) else {
+                        return Box::pin(async {});
+                    };
                     let handler = handler_slot.lock().unwrap().clone();
-                    match serde_json::from_slice::<ClientMessage>(&m.data) {
+                    match serde_json::from_slice::<ClientMessage>(&data) {
                         Ok(ClientMessage::SdpAnswer { sdp }) => {
                             match serde_json::from_str::<RTCSessionDescription>(&sdp) {
                                 Ok(answer) => {
@@ -378,12 +466,15 @@ impl ClientPeer {
         let pc_handler = pc.clone();
         let dc_handler = dc.clone();
         let on_msg_slot = on_msg.clone();
+        let assembler = Arc::new(Mutex::new(ChunkAssembler::default()));
         dc.on_message(Box::new(move |m: DataChannelMessage| {
             let pc = pc_handler.clone();
             let dc = dc_handler.clone();
             let on_msg_slot = on_msg_slot.clone();
+            let data = assembler.lock().unwrap().push(&m.data);
             Box::pin(async move {
-                match serde_json::from_slice::<HostMessage>(&m.data) {
+                let Some(data) = data else { return };
+                match serde_json::from_slice::<HostMessage>(&data) {
                     Ok(HostMessage::SdpOffer { sdp }) => {
                         let offer: RTCSessionDescription = match serde_json::from_str(&sdp) {
                             Ok(o) => o,
@@ -415,7 +506,9 @@ impl ClientPeer {
                         let msg = ClientMessage::SdpAnswer {
                             sdp: serde_json::to_string(&local).unwrap(),
                         };
-                        if let Err(e) = dc.send_text(serde_json::to_string(&msg).unwrap()).await {
+                        if let Err(e) =
+                            send_text_chunked(&dc, serde_json::to_string(&msg).unwrap()).await
+                        {
                             warn!("send SdpAnswer: {e}");
                         }
                     }
@@ -472,11 +565,7 @@ impl ClientPeer {
 
     pub async fn send(&self, msg: &ClientMessage) -> Result<()> {
         let json = serde_json::to_string(msg)?;
-        self.dc
-            .send_text(json)
-            .await
-            .context("send on data channel")?;
-        Ok(())
+        send_text_chunked(&self.dc, json).await
     }
 
     pub fn on_disconnect(&self, f: impl Fn() + Send + Sync + 'static) {
@@ -574,6 +663,106 @@ mod tests {
     fn popping_an_empty_queue_returns_none() {
         let queue = PendingAnswerQueue::new();
         assert!(queue.pop().is_none());
+    }
+
+    // --- Chunked control messages ---
+
+    /// Splits exactly like `send_text_chunked` (same cut logic) so the
+    /// assembler is tested against the frames the sender would produce.
+    fn chunk_frames(json: &str) -> Vec<String> {
+        let mut frames = Vec::new();
+        let mut rest = json;
+        let mut seq = 0u32;
+        while !rest.is_empty() {
+            let mut cut = CHUNK_PAYLOAD_BYTES.min(rest.len());
+            while !rest.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let (head, tail) = rest.split_at(cut);
+            rest = tail;
+            frames.push(
+                serde_json::to_string(&WireEnvelope::Chunk {
+                    seq,
+                    last: rest.is_empty(),
+                    data: head.to_owned(),
+                })
+                .unwrap(),
+            );
+            seq += 1;
+        }
+        frames
+    }
+
+    #[test]
+    fn small_messages_pass_through_the_assembler_unchanged() {
+        let mut asm = ChunkAssembler::default();
+        let msg = br#"{"type":"WindowClosed","window_id":3}"#;
+        assert_eq!(asm.push(msg).as_deref(), Some(msg.as_slice()));
+    }
+
+    #[test]
+    fn oversized_message_reassembles_to_the_original() {
+        // Comfortably past the 64 KiB SCTP cap, like a many-track SDP offer.
+        let big: String = "x".repeat(90_000);
+        let original = serde_json::to_string(&HostMessage::SdpOffer { sdp: big }).unwrap();
+        let frames = chunk_frames(&original);
+        assert!(frames.len() > 1, "message must actually have been split");
+        assert!(
+            frames.iter().all(|f| f.len() <= 65536),
+            "every frame must fit in one SCTP message"
+        );
+
+        let mut asm = ChunkAssembler::default();
+        let mut complete = None;
+        for (i, f) in frames.iter().enumerate() {
+            let out = asm.push(f.as_bytes());
+            if i + 1 < frames.len() {
+                assert!(out.is_none(), "no message before the last chunk");
+            } else {
+                complete = out;
+            }
+        }
+        assert_eq!(complete.as_deref(), Some(original.as_bytes()));
+    }
+
+    #[test]
+    fn interleaved_passthrough_does_not_corrupt_reassembly() {
+        // The sender never interleaves (sends are awaited in sequence), but a
+        // pass-through parse must not disturb a pending chunk buffer either.
+        let big: String = "y".repeat(40_000);
+        let original = serde_json::to_string(&HostMessage::SdpOffer { sdp: big }).unwrap();
+        let frames = chunk_frames(&original);
+
+        let mut asm = ChunkAssembler::default();
+        assert!(asm.push(frames[0].as_bytes()).is_none());
+        let small = br#"{"type":"WindowClosed","window_id":9}"#;
+        assert_eq!(asm.push(small).as_deref(), Some(small.as_slice()));
+        let mut complete = None;
+        for f in &frames[1..] {
+            complete = asm.push(f.as_bytes());
+        }
+        assert_eq!(complete.as_deref(), Some(original.as_bytes()));
+    }
+
+    #[test]
+    fn sequence_gap_drops_partial_and_recovers_on_next_message() {
+        let big: String = "z".repeat(40_000);
+        let original = serde_json::to_string(&HostMessage::SdpOffer { sdp: big }).unwrap();
+        let frames = chunk_frames(&original);
+        assert!(frames.len() >= 3);
+
+        let mut asm = ChunkAssembler::default();
+        assert!(asm.push(frames[0].as_bytes()).is_none());
+        // Skip frame 1: the splice must be dropped, not delivered corrupted.
+        assert!(asm.push(frames[2].as_bytes()).is_none());
+        assert!(asm.push(frames.last().unwrap().as_bytes()).is_none());
+
+        // A fresh, complete message afterwards reassembles cleanly.
+        let mut complete = None;
+        for f in &frames {
+            complete = asm.push(f.as_bytes());
+        }
+        assert_eq!(complete.as_deref(), Some(original.as_bytes()));
     }
 
     // --- Answer/offer content validation ---
