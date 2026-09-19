@@ -2,4 +2,5 @@
 //! (`srw-mirror-helper`) share this library.
 
 pub mod app;
+pub mod ipc;
 pub mod net;
