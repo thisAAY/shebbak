@@ -120,6 +120,14 @@ pub(crate) fn replay_frames(state: &AppState) -> Vec<DownFrame> {
     frames
 }
 
+/// The Icon frame to send right after the very first successful spawn for
+/// a newly announced app (before it has any windows). Respawns never call
+/// this — they rely solely on `replay_frames`, which already includes the
+/// icon — so a helper is sent its icon exactly once per (re)spawn.
+pub(crate) fn initial_icon_frame(state: &AppState) -> Option<DownFrame> {
+    (!state.icon_png.is_empty()).then(|| DownFrame::Icon(state.icon_png.clone()))
+}
+
 pub struct HelperManager {
     router: Arc<VideoRouter>,
     to_host: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
@@ -196,8 +204,18 @@ impl HelperManager {
                     respawned_once: false,
                     given_up: false,
                 };
-                if let Err(e) = self.spawn(&mut state) {
-                    error!("spawn helper for '{}': {e:#}", state.name);
+                match self.spawn(&mut state) {
+                    Ok(()) => {
+                        // The only icon send for this app's initial spawn;
+                        // every later (re)spawn's icon comes from
+                        // `replay_frames` inside `spawn_and_replay`.
+                        if let Some(frame) = initial_icon_frame(&state) {
+                            if let Some(running) = state.running.as_ref() {
+                                let _ = running.down_tx.send(frame);
+                            }
+                        }
+                    }
+                    Err(e) => error!("spawn helper for '{}': {e:#}", state.name),
                 }
                 self.apps.insert(app_id, state);
             }
@@ -504,8 +522,42 @@ impl HelperManager {
             .spawn()
             .with_context(|| format!("spawn helper {}", state.bundle.exe.display()))?;
         drop(helper_end);
-        info!("helper for '{}' spawned (pid {})", state.name, child.id());
+        // Captured before handing `child` off to `wire_helper`: on any
+        // failure there, `child` may already be gone (dropped inside a
+        // thread closure that was never run — `Builder::spawn` drops an
+        // unrun closure on failure without invoking it), so the pid is
+        // the only reliable handle left to reap the process by.
+        let pid = child.id();
+        info!("helper for '{}' spawned (pid {pid})", state.name);
 
+        match self.wire_helper(state, coord_end, child) {
+            Ok(down_tx) => {
+                state.running = Some(RunningHelper { down_tx });
+                Ok(())
+            }
+            Err(e) => {
+                // The process is already forked+exec'd but no reaper
+                // thread ended up owning it — wait() it ourselves so it
+                // doesn't linger as a zombie (or an orphan, if it's still
+                // running) once it exits.
+                reap_by_pid(pid);
+                Err(e)
+            }
+        }
+    }
+
+    /// Wires a freshly spawned helper's socket to writer/reader threads and
+    /// installs a reaper thread that owns `child`. Returns the channel that
+    /// feeds the writer thread. Every step here is fallible; the caller
+    /// (`spawn`) reaps `child` by pid if this returns `Err`, since `child`
+    /// itself may already have been dropped inside a thread closure that
+    /// never ran (the reaper-thread-spawn failure case).
+    fn wire_helper(
+        &self,
+        state: &AppState,
+        coord_end: UnixStream,
+        child: std::process::Child,
+    ) -> Result<Sender<DownFrame>> {
         // Writer thread: sole owner of the write direction. On channel
         // close (RunningHelper dropped) it shuts down the write half so
         // the helper sees EOF even while our reader clone stays open.
@@ -547,7 +599,8 @@ impl HelperManager {
                 .context("spawn reader thread")?;
         }
 
-        // Reaper thread: exit status → coordinator event queue.
+        // Reaper thread: exit status → coordinator event queue. Takes
+        // ownership of `child` as the last fallible step here.
         {
             let app_id = state.app_id;
             let events = self.events.clone();
@@ -563,13 +616,7 @@ impl HelperManager {
                 .context("spawn reaper thread")?;
         }
 
-        // A freshly announced app gets its icon straight away; respawns
-        // resend it via replay_frames.
-        if !state.icon_png.is_empty() && state.windows.is_empty() {
-            let _ = down_tx.send(DownFrame::Icon(state.icon_png.clone()));
-        }
-        state.running = Some(RunningHelper { down_tx });
-        Ok(())
+        Ok(down_tx)
     }
 
     fn spawn_inner(&mut self, app_id: AppId) -> Result<()> {
@@ -583,6 +630,18 @@ impl HelperManager {
         if let Some(tx) = self.apps.get(&app_id).and_then(|s| s.running.as_ref()) {
             let _ = tx.down_tx.send(frame);
         }
+    }
+}
+
+/// Best-effort reap of a helper process the coordinator failed to hand off
+/// to a reaper thread. Used only on a `spawn()` failure path after the
+/// process was already forked+exec'd — a failure here just means the
+/// process was already gone.
+fn reap_by_pid(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        let mut status: libc::c_int = 0;
+        libc::waitpid(pid as libc::pid_t, &mut status, 0);
     }
 }
 
@@ -677,5 +736,16 @@ mod tests {
     fn replay_skips_icon_when_app_has_none() {
         let state = AppState::for_test("NoIcon", Vec::new());
         assert!(replay_frames(&state).is_empty());
+    }
+
+    #[test]
+    fn initial_icon_frame_only_when_icon_present() {
+        let with_icon = AppState::for_test("Safari", vec![1u8, 2, 3]);
+        match initial_icon_frame(&with_icon) {
+            Some(DownFrame::Icon(png)) => assert_eq!(png, vec![1u8, 2, 3]),
+            other => panic!("expected Some(Icon), got {other:?}"),
+        }
+        let without_icon = AppState::for_test("NoIcon", Vec::new());
+        assert!(initial_icon_frame(&without_icon).is_none());
     }
 }
