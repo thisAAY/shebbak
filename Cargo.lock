@@ -3000,6 +3000,7 @@ name = "srw-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "core-graphics 0.24.0",
  "srw-capture",
  "srw-core",

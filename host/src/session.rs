@@ -344,11 +344,17 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
                 info!("input worker exiting");
             })?
     };
+    // Client-driven app unsubscribe: session-level (tears down tracks), so
+    // it must not ride the input worker. Routed to the reconciler loop.
+    let (unsub_tx, mut unsub_rx) = tokio::sync::mpsc::unbounded_channel::<i32>();
     {
-        // Client → host messages: non-blocking hand-off to the ordered worker.
         let input_tx = input_tx.clone();
         peer.on_client_message(move |msg| {
-            let _ = input_tx.send(InputWork::Message(msg));
+            if let ClientMessage::UnsubscribeApp { app_id } = msg {
+                let _ = unsub_tx.send(app_id);
+            } else {
+                let _ = input_tx.send(InputWork::Message(msg));
+            }
         });
     }
 
@@ -464,6 +470,7 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
         &tracker,
         &mut source,
         &mut poke_rx,
+        &mut unsub_rx,
         &disconnected,
         &mut runtimes,
         &pli_pipelines,
@@ -505,6 +512,7 @@ async fn run_session_body(
     tracker: &Arc<Mutex<AppTracker>>,
     source: &mut PidSnapshotSource,
     poke_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+    unsub_rx: &mut tokio::sync::mpsc::UnboundedReceiver<i32>,
     disconnected: &Arc<AtomicBool>,
     runtimes: &mut RuntimeMap,
     pli_pipelines: &PliPipelineMap,
@@ -514,6 +522,7 @@ async fn run_session_body(
     let rt = tokio::runtime::Handle::current();
     let mut interval = tokio::time::interval(Duration::from_millis(RECONCILE_MS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut announced: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
     while !disconnected.load(Ordering::SeqCst) {
         tokio::select! {
@@ -521,6 +530,28 @@ async fn run_session_body(
             Some(()) = poke_rx.recv() => {
                 // Debounce a burst of AX notifications into one reconcile pass.
                 while poke_rx.try_recv().is_ok() {}
+            }
+            Some(pid) = unsub_rx.recv() => {
+                info!("client unsubscribed app {pid}; removing its tracks");
+                let closed = tracker.lock().unwrap().remove_pid(pid);
+                let mut tracks_changed = false;
+                for window_id in closed {
+                    if let Some(rt_entry) = runtimes.remove(&window_id) {
+                        pli_pipelines.lock().unwrap().remove(&rt_entry.track_id);
+                        if let Err(e) = peer.remove_track(&rt_entry.track_id).await {
+                            warn!("remove_track: {e}");
+                        }
+                        teardown_runtime(rt_entry);
+                        tracks_changed = true;
+                    }
+                }
+                if tracks_changed {
+                    if let Err(e) = peer.renegotiate().await {
+                        warn!("renegotiation failed: {e:#}");
+                    }
+                }
+                let _ = input_tx.send(InputWork::UpdatePids(tracker.lock().unwrap().pid_map()));
+                continue;
             }
         }
 
@@ -558,6 +589,26 @@ async fn run_session_body(
                                 window.info.id
                             );
                             continue;
+                        }
+                    }
+                    if !announced.contains(&window.pid) {
+                        announced.insert(window.pid);
+                        use base64::Engine as _;
+                        let (name, icon_png) =
+                            match srw_capture::macos::app_identity::app_identity(window.pid) {
+                                Some(id) => (
+                                    id.name,
+                                    base64::engine::general_purpose::STANDARD.encode(&id.icon_png),
+                                ),
+                                None => (format!("App {}", window.pid), String::new()),
+                            };
+                        let msg = HostMessage::AppAnnounced {
+                            app_id: window.pid,
+                            name,
+                            icon_png,
+                        };
+                        if let Err(e) = peer.send(&msg).await {
+                            warn!("send AppAnnounced: {e}");
                         }
                     }
                     let msg = HostMessage::WindowOpened {
