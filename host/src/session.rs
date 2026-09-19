@@ -3,6 +3,7 @@ use srw_capture::macos::ax_watch::AxWatcher;
 use srw_capture::macos::list::PidSnapshotSource;
 use srw_capture::macos::stream::SckCapture;
 use srw_capture::WindowCapture;
+use srw_core::mapping::{mapping_for_frame, FrameMeta, InputMapping};
 use srw_core::model::{window_local_to_screen, SnapshotWindow};
 use srw_core::protocol::{ClientMessage, HostMessage, WindowId, WindowKind};
 use srw_core::tracker::{AppTracker, TrackerEvent, WindowSnapshotSource};
@@ -44,6 +45,10 @@ type RuntimeMap = HashMap<WindowId, WindowRuntime>;
 /// a PLI on any track can find its encoder without walking `RuntimeMap`
 /// (whose key is `WindowId`, not `track_id`).
 type PliPipelineMap = Arc<Mutex<HashMap<String, Arc<Pipeline>>>>;
+
+/// Capture-callback → mapping-forwarder channel: raw per-window frame
+/// metadata, already deduped at the callback so it stays quiet at 30 fps.
+type MetaSender = tokio::sync::mpsc::UnboundedSender<(WindowId, FrameMeta)>;
 
 /// Work items for the single ordered input-delivery worker (M1 pattern,
 /// extended for v2): a dedicated thread drains these in arrival order so a
@@ -102,6 +107,7 @@ fn teardown_runtime(rt: WindowRuntime) {
 /// `Arc<Pipeline>` to stop it later), and the track is removed from the peer
 /// (otherwise a dead `track_id` m-line lingers in the SDP all session, with
 /// no `runtimes` entry for the Closed arm to ever clean it up).
+#[allow(clippy::too_many_arguments)]
 async fn open_track_window(
     peer: &HostPeer,
     rt: &tokio::runtime::Handle,
@@ -110,6 +116,7 @@ async fn open_track_window(
     track_id: &str,
     runtimes: &mut RuntimeMap,
     pli_pipelines: &PliPipelineMap,
+    meta_tx: &MetaSender,
 ) -> Result<()> {
     let track = peer.add_track(track_id).await?;
     // `add_track` isn't a pure constructor: it already registered a sender on
@@ -139,7 +146,21 @@ async fn open_track_window(
         }
     };
     let push_pipe = pipeline.clone();
-    if let Err(e) = capture.start(Box::new(move |frame, _meta| push_pipe.push(frame))) {
+    let meta_tx = meta_tx.clone();
+    let window_id = window.info.id;
+    let last_meta = Mutex::new(FrameMeta::default());
+    if let Err(e) = capture.start(Box::new(move |frame, meta| {
+        push_pipe.push(frame);
+        // Dedup on the raw metadata: the mapping is a pure function of
+        // (meta, window width/height), and a resize reconfigures the
+        // capture (changing meta.width_px/height_px), so unchanged meta ⇒
+        // unchanged mapping. The closure is `Fn`, hence the Mutex cell.
+        let mut last = last_meta.lock().unwrap();
+        if *last != meta {
+            *last = meta;
+            let _ = meta_tx.send((window_id, meta));
+        }
+    })) {
         pipeline.stop();
         let _ = peer.remove_track(track_id).await;
         return Err(e);
@@ -174,6 +195,7 @@ fn restart_capture(
     scale: f64,
     tracker: &Arc<Mutex<AppTracker>>,
     runtimes: &mut RuntimeMap,
+    meta_tx: &MetaSender,
 ) {
     let Some(WindowRuntime::Track {
         pipeline, capture, ..
@@ -197,7 +219,20 @@ fn restart_capture(
         }
     };
     let push_pipe = pipeline.clone();
-    if let Err(e) = new_capture.start(Box::new(move |frame, _meta| push_pipe.push(frame))) {
+    let meta_tx = meta_tx.clone();
+    let last_meta = Mutex::new(FrameMeta::default());
+    if let Err(e) = new_capture.start(Box::new(move |frame, meta| {
+        push_pipe.push(frame);
+        // Dedup on the raw metadata: the mapping is a pure function of
+        // (meta, window width/height), and a resize reconfigures the
+        // capture (changing meta.width_px/height_px), so unchanged meta ⇒
+        // unchanged mapping. The closure is `Fn`, hence the Mutex cell.
+        let mut last = last_meta.lock().unwrap();
+        if *last != meta {
+            *last = meta;
+            let _ = meta_tx.send((window_id, meta));
+        }
+    })) {
         warn!("restore window {window_id}: capture start failed: {e:#}");
         return;
     }
@@ -344,6 +379,44 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
         });
     }
 
+    // Frame-geometry → input-mapping forwarder: capture callbacks push
+    // FrameMeta changes here; this turns them into change-triggered
+    // HostMessage::InputMapping sends. Identity is implicit at open, so
+    // nothing is sent until a mapping first deviates (letterboxing), and
+    // the return to 1:1 is sent because it differs from the last send.
+    let (meta_tx, mut meta_rx) = tokio::sync::mpsc::unbounded_channel::<(WindowId, FrameMeta)>();
+    {
+        let tracker = tracker.clone();
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let mut last_sent: HashMap<WindowId, InputMapping> = HashMap::new();
+            while let Some((window_id, meta)) = meta_rx.recv().await {
+                let Some(win) = tracker.lock().unwrap().geometry(window_id).cloned() else {
+                    continue; // window closed under us; nothing to map
+                };
+                let mapping = mapping_for_frame(&meta, &win);
+                let send = match last_sent.get(&window_id) {
+                    Some(prev) => !mapping.approx_eq(prev),
+                    None => !mapping.is_identity(),
+                };
+                if send {
+                    last_sent.insert(window_id, mapping);
+                    let msg = HostMessage::InputMapping {
+                        window_id,
+                        scale_x: mapping.scale_x,
+                        scale_y: mapping.scale_y,
+                        offset_x: mapping.offset_x,
+                        offset_y: mapping.offset_y,
+                    };
+                    if let Err(e) = peer.send(&msg).await {
+                        warn!("send InputMapping: {e}");
+                    }
+                }
+            }
+            // Ends when the last MetaSender clone drops at session teardown.
+        });
+    }
+
     // Wait for the control channel to actually open by retrying a harmless
     // send (as M1's announce retry did): window_id 0 never exists, and the
     // client ignores unknown ids by design, so this is a no-op probe once it
@@ -414,6 +487,7 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
         &mut runtimes,
         &pli_pipelines,
         &input_tx,
+        &meta_tx,
     )
     .await;
 
@@ -454,6 +528,7 @@ async fn run_session_body(
     runtimes: &mut RuntimeMap,
     pli_pipelines: &PliPipelineMap,
     input_tx: &std::sync::mpsc::Sender<InputWork>,
+    meta_tx: &MetaSender,
 ) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
     let mut interval = tokio::time::interval(Duration::from_millis(RECONCILE_MS));
@@ -495,6 +570,7 @@ async fn run_session_body(
                                 &tid,
                                 runtimes,
                                 pli_pipelines,
+                                meta_tx,
                             )
                             .await
                             {
@@ -571,7 +647,7 @@ async fn run_session_body(
                     let _ = peer.send(&HostMessage::WindowMinimized { window_id }).await;
                 }
                 TrackerEvent::Restored { window_id } => {
-                    restart_capture(window_id, scale, tracker, runtimes);
+                    restart_capture(window_id, scale, tracker, runtimes, meta_tx);
                     let _ = peer.send(&HostMessage::WindowRestored { window_id }).await;
                 }
                 TrackerEvent::Resized {
