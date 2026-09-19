@@ -135,9 +135,9 @@ pub struct BgraFrame {
 /// A tightly packed 8-bit RGBA image with **unpremultiplied** alpha.
 ///
 /// Unlike [`BgraFrame`] (which backs the live video path), this is the
-/// wire format for one-shot window snapshots (e.g. the transient-blit
-/// source): RGBA8, row-major, no padding, alpha not premultiplied so it
-/// composites correctly once decoded on the client.
+/// wire format for one-shot window snapshots: RGBA8, row-major, no
+/// padding, alpha not premultiplied so it composites correctly once
+/// decoded on the client.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RgbaImage {
     pub width: u32,

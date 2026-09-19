@@ -71,6 +71,13 @@ pub struct App {
     modifiers: ModifiersState,
     /// Frames that arrived before the mirror window existed, keyed by track_id.
     early_frames: HashMap<String, BgraFrame>,
+    /// Last `InputMapping` seen for a remote window, keyed by remote id —
+    /// kept even for windows with no live `Mirror` yet, since an
+    /// `InputMapping` can arrive before the announcement/track pairing
+    /// finishes and would otherwise be dropped with no re-send. Consulted
+    /// by `create_mirror` to seed the mirror's mapping instead of assuming
+    /// identity.
+    pending_mappings: HashMap<WindowId, InputMapping>,
     mirrors: HashMap<WinitWindowId, Mirror>,
     by_remote: HashMap<WindowId, WinitWindowId>,
     by_track: HashMap<String, WinitWindowId>,
@@ -88,6 +95,7 @@ impl App {
             binder: TrackBinder::new(),
             modifiers: ModifiersState::empty(),
             early_frames: HashMap::new(),
+            pending_mappings: HashMap::new(),
             mirrors: HashMap::new(),
             by_remote: HashMap::new(),
             by_track: HashMap::new(),
@@ -190,13 +198,20 @@ impl App {
                     offset_x,
                     offset_y,
                 }) => {
+                    let mapping = InputMapping {
+                        scale_x,
+                        scale_y,
+                        offset_x,
+                        offset_y,
+                    };
+                    // Always buffer, even if a live mirror also gets updated
+                    // below: the mapping can arrive before the mirror exists
+                    // (the announcement/track pairing races the host's
+                    // send), and a dropped-here mapping would otherwise
+                    // never be re-sent, stranding the client at identity.
+                    self.pending_mappings.insert(window_id, mapping);
                     if let Some(m) = self.mirror_for_remote(window_id) {
-                        m.mapping = InputMapping {
-                            scale_x,
-                            scale_y,
-                            offset_x,
-                            offset_y,
-                        };
+                        m.mapping = mapping;
                     }
                 }
                 UiEvent::Host(HostMessage::SdpOffer { .. }) => {
@@ -265,7 +280,11 @@ impl App {
             last_host_size: (ann.info.width, ann.info.height),
             cursor: PhysicalPosition::new(0.0, 0.0),
             last_move_sent: Instant::now(),
-            mapping: InputMapping::IDENTITY,
+            mapping: self
+                .pending_mappings
+                .get(&ann.info.id)
+                .copied()
+                .unwrap_or(InputMapping::IDENTITY),
         };
         mirror.window.request_redraw();
         self.mirrors.insert(wid, mirror);
@@ -275,6 +294,7 @@ impl App {
     }
 
     fn destroy_mirror_by_remote(&mut self, remote: WindowId) {
+        self.pending_mappings.remove(&remote);
         if let Some(wid) = self.by_remote.remove(&remote) {
             self.mirrors.remove(&wid);
             // Collect the track ids bound to this mirror before dropping them

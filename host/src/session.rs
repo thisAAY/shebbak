@@ -3,8 +3,9 @@ use srw_capture::macos::ax_watch::AxWatcher;
 use srw_capture::macos::list::PidSnapshotSource;
 use srw_capture::macos::stream::SckCapture;
 use srw_capture::WindowCapture;
-use srw_core::mapping::{mapping_for_frame, FrameMeta, InputMapping};
+use srw_core::mapping::{mapping_for_frame, should_send, FrameMeta, InputMapping};
 use srw_core::model::{window_local_to_screen, SnapshotWindow};
+use srw_core::pixels::BgraFrame;
 use srw_core::protocol::{ClientMessage, HostMessage, WindowId};
 use srw_core::tracker::{AppTracker, TrackerEvent, WindowSnapshotSource};
 use srw_input::macos::AxInput;
@@ -73,6 +74,32 @@ fn local_lan_ip() -> Option<std::net::IpAddr> {
     socket.local_addr().ok().map(|a| a.ip())
 }
 
+/// Builds the per-capture frame callback: pushes the raw frame into the
+/// encoder pipeline and forwards deduped `FrameMeta` changes to the mapping
+/// forwarder. Shared by `open_track_window` and `restart_capture`, which
+/// each start a fresh `SckCapture` with an otherwise-identical callback.
+fn frame_sink(
+    pipeline: &Arc<Pipeline>,
+    meta_tx: &MetaSender,
+    window_id: WindowId,
+) -> Box<dyn Fn(BgraFrame, FrameMeta) + Send + Sync> {
+    let push_pipe = pipeline.clone();
+    let meta_tx = meta_tx.clone();
+    let last_meta = Mutex::new(FrameMeta::default());
+    Box::new(move |frame, meta| {
+        push_pipe.push(frame);
+        // Dedup on the raw metadata: the mapping is a pure function of
+        // (meta, window width/height), and a resize reconfigures the
+        // capture (changing meta.width_px/height_px), so unchanged meta ⇒
+        // unchanged mapping. The closure is `Fn`, hence the Mutex cell.
+        let mut last = last_meta.lock().unwrap();
+        if *last != meta {
+            *last = meta;
+            let _ = meta_tx.send((window_id, meta));
+        }
+    })
+}
+
 fn teardown_runtime(rt: WindowRuntime) {
     if let Some(mut c) = rt.capture {
         c.stop();
@@ -127,22 +154,8 @@ async fn open_track_window(
             return Err(e);
         }
     };
-    let push_pipe = pipeline.clone();
-    let meta_tx = meta_tx.clone();
     let window_id = window.info.id;
-    let last_meta = Mutex::new(FrameMeta::default());
-    if let Err(e) = capture.start(Box::new(move |frame, meta| {
-        push_pipe.push(frame);
-        // Dedup on the raw metadata: the mapping is a pure function of
-        // (meta, window width/height), and a resize reconfigures the
-        // capture (changing meta.width_px/height_px), so unchanged meta ⇒
-        // unchanged mapping. The closure is `Fn`, hence the Mutex cell.
-        let mut last = last_meta.lock().unwrap();
-        if *last != meta {
-            *last = meta;
-            let _ = meta_tx.send((window_id, meta));
-        }
-    })) {
+    if let Err(e) = capture.start(frame_sink(&pipeline, meta_tx, window_id)) {
         pipeline.stop();
         let _ = peer.remove_track(track_id).await;
         return Err(e);
@@ -200,21 +213,7 @@ fn restart_capture(
             return;
         }
     };
-    let push_pipe = pipeline.clone();
-    let meta_tx = meta_tx.clone();
-    let last_meta = Mutex::new(FrameMeta::default());
-    if let Err(e) = new_capture.start(Box::new(move |frame, meta| {
-        push_pipe.push(frame);
-        // Dedup on the raw metadata: the mapping is a pure function of
-        // (meta, window width/height), and a resize reconfigures the
-        // capture (changing meta.width_px/height_px), so unchanged meta ⇒
-        // unchanged mapping. The closure is `Fn`, hence the Mutex cell.
-        let mut last = last_meta.lock().unwrap();
-        if *last != meta {
-            *last = meta;
-            let _ = meta_tx.send((window_id, meta));
-        }
-    })) {
+    if let Err(e) = new_capture.start(frame_sink(pipeline, meta_tx, window_id)) {
         warn!("restore window {window_id}: capture start failed: {e:#}");
         return;
     }
@@ -374,14 +373,11 @@ pub async fn run_session(pids: &[i32], scale: f64) -> Result<()> {
             let mut last_sent: HashMap<WindowId, InputMapping> = HashMap::new();
             while let Some((window_id, meta)) = meta_rx.recv().await {
                 let Some(win) = tracker.lock().unwrap().geometry(window_id).cloned() else {
-                    continue; // window closed under us; nothing to map
+                    last_sent.remove(&window_id); // window closed under us; bound stale-entry growth
+                    continue;
                 };
                 let mapping = mapping_for_frame(&meta, &win);
-                let send = match last_sent.get(&window_id) {
-                    Some(prev) => !mapping.approx_eq(prev),
-                    None => !mapping.is_identity(),
-                };
-                if send {
+                if should_send(last_sent.get(&window_id), &mapping) {
                     last_sent.insert(window_id, mapping);
                     let msg = HostMessage::InputMapping {
                         window_id,

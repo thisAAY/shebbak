@@ -16,7 +16,13 @@ pub struct FrameMeta {
     pub content_rect: Option<(f64, f64, f64, f64)>,
     /// `SCStreamFrameInfo.contentScale`.
     pub content_scale: Option<f64>,
-    /// `SCStreamFrameInfo.scaleFactor` (display backing scale).
+    /// `SCStreamFrameInfo.scaleFactor`. Its exact semantics are unverified
+    /// beyond the Task-1 gate run, where it read 2.0 and was consistent
+    /// with either "output pixels per content point" or "display backing
+    /// scale" — the run couldn't separate the two readings (both the main
+    /// display's backing scale and the host's `--scale` were 2.0). The
+    /// `cs ≈ 1.0` early return in `mapping_for_frame` removes the mapping's
+    /// dependence on this field in the common (non-letterboxed) state.
     pub scale_factor: Option<f64>,
     /// `SCStreamFrameInfo.boundingRect` as (x, y, width, height). Observed
     /// frame-local and identical to `content_rect` on macOS 26 (see the
@@ -68,6 +74,17 @@ impl InputMapping {
     }
 }
 
+/// Whether a newly derived mapping is worth sending to the client: identity
+/// is implicit at open (never sent first), and every real change is sent
+/// exactly once — subsequent frames producing the same mapping (within
+/// tolerance) stay quiet.
+pub fn should_send(last: Option<&InputMapping>, next: &InputMapping) -> bool {
+    match last {
+        Some(prev) => !next.approx_eq(prev),
+        None => !next.is_identity(),
+    }
+}
+
 /// Derive the client-side pointer transform for one frame.
 ///
 /// `win` is the tracked window's rect in host screen points (top-left
@@ -90,6 +107,9 @@ pub fn mapping_for_frame(meta: &FrameMeta, win: &WindowInfo) -> InputMapping {
     };
     if cs <= 0.0 || sf <= 0.0 || win.width <= 0.0 || win.height <= 0.0 {
         return InputMapping::IDENTITY; // degenerate metadata → fail open
+    }
+    if (cs - 1.0).abs() <= SCALE_TOL {
+        return InputMapping::IDENTITY; // no letterboxing ⇒ frame is 1:1 with the window
     }
     // Union origin relative to the window origin. The metadata does not
     // carry it (boundingRect is frame-local), so it comes from how macOS
@@ -256,6 +276,24 @@ mod tests {
     }
 
     #[test]
+    fn cs_exactly_one_is_identity_even_with_mismatched_size() {
+        // cs == 1.0 exactly should hit the early return regardless of what
+        // the rest of the metadata says — even a frame/window size that
+        // would otherwise produce a non-identity affine (a stale or
+        // corrupt sf reading, say) must not leak through.
+        let meta = FrameMeta {
+            width_px: 3000, // wildly mismatched vs. an 800x600 window at any sf
+            height_px: 2000,
+            content_rect: Some((0.0, 0.0, 800.0, 600.0)),
+            content_scale: Some(1.0),
+            scale_factor: Some(2.0),
+            bounding_rect: Some((0.0, 0.0, 800.0, 600.0)),
+        };
+        let m = mapping_for_frame(&meta, &win_800x600());
+        assert!(m.is_identity(), "expected identity, got {m:?}");
+    }
+
+    #[test]
     fn approx_eq_tolerances() {
         let a = InputMapping::IDENTITY;
         let mut b = InputMapping::IDENTITY;
@@ -266,5 +304,25 @@ mod tests {
         let mut c = InputMapping::IDENTITY;
         c.scale_x = 1.2; // an actual letterbox-sized change
         assert!(!a.approx_eq(&c));
+    }
+
+    #[test]
+    fn should_send_no_previous_send() {
+        assert!(!should_send(None, &InputMapping::IDENTITY));
+        let mut letterboxed = InputMapping::IDENTITY;
+        letterboxed.scale_x = 1.6;
+        assert!(should_send(None, &letterboxed));
+    }
+
+    #[test]
+    fn should_send_against_previous_send() {
+        let mut prev = InputMapping::IDENTITY;
+        prev.scale_x = 1.6;
+        let mut differs = prev;
+        differs.scale_x = 1.8; // beyond SCALE_TOL of prev
+        assert!(should_send(Some(&prev), &differs));
+        let mut within_tol = prev;
+        within_tol.offset_x += 0.1; // under OFFSET_TOL
+        assert!(!should_send(Some(&prev), &within_tol));
     }
 }
