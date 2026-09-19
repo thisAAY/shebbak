@@ -15,3 +15,7 @@ core-graphics = "0.24"
 screencapturekit = { version = "10", features = ["macos_14_2"] }
 accessibility-sys = "0.1"
 png = "0.17"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSData", "NSDictionary", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSGraphicsContext"] }
+objc2-core-graphics = "0.3"
