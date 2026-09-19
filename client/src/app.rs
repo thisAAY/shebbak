@@ -219,6 +219,10 @@ impl App {
                     info!("host closed window {window_id}");
                     self.destroy_mirror_by_remote(window_id);
                 }
+                UiEvent::Host(HostMessage::InputMapping { .. }) => {
+                    // Wired to Mirror.mapping in the client task of the
+                    // 2026-09-19 native-compositing plan.
+                }
                 UiEvent::Host(HostMessage::TransientBlit { .. } | HostMessage::SdpOffer { .. }) => {
                     // TransientBlit: net.rs's BlitAssembler intercepts these
                     // chunks and surfaces assembled images as `UiEvent::Blit`

@@ -45,6 +45,18 @@ pub enum HostMessage {
     WindowClosed {
         window_id: WindowId,
     },
+    /// Change-triggered pointer-coordinate mapping for one window's stream
+    /// (`window_local = offset + scale * mirror_point`). Identity is
+    /// implicit at window open; sent only when the mapping changes — i.e.
+    /// while SCK letterboxes an oversized child window into the frame, and
+    /// again when it returns to 1:1.
+    InputMapping {
+        window_id: WindowId,
+        scale_x: f64,
+        scale_y: f64,
+        offset_x: f64,
+        offset_y: f64,
+    },
     TransientBlit {
         window_id: WindowId,
         seq: u32,
@@ -158,6 +170,13 @@ mod tests {
             HostMessage::WindowMinimized { window_id: 42 },
             HostMessage::WindowRestored { window_id: 42 },
             HostMessage::WindowClosed { window_id: 42 },
+            HostMessage::InputMapping {
+                window_id: 42,
+                scale_x: 7.0 / 6.0,
+                scale_y: 7.0 / 6.0,
+                offset_x: -66.67,
+                offset_y: -100.0,
+            },
             HostMessage::TransientBlit {
                 window_id: 43,
                 seq: 7,
