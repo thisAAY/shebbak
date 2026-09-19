@@ -54,12 +54,36 @@ fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> Result<()> {
 
 fn read_frame(r: &mut impl Read) -> Result<Option<(u8, Vec<u8>)>> {
     let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf) {
-        Ok(()) => {}
-        // EOF exactly on a frame boundary is the clean-shutdown signal.
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e).context("read frame length"),
+    let mut filled = 0;
+
+    loop {
+        match r.read(&mut len_buf[filled..]) {
+            Ok(0) => {
+                // EOF reached. Clean shutdown only if zero bytes were read.
+                if filled == 0 {
+                    return Ok(None);
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "EOF inside length header (read {}/4 bytes)",
+                        filled
+                    ));
+                }
+            }
+            Ok(n) => {
+                filled += n;
+                if filled == 4 {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(e) => {
+                return Err(e).context("read frame length");
+            }
+        }
     }
+
     let len = u32::from_le_bytes(len_buf);
     ensure!((1..=MAX_FRAME).contains(&len), "bad frame length {len}");
     let mut buf = vec![0u8; len as usize];
@@ -223,5 +247,26 @@ mod tests {
         let mut buf = (MAX_FRAME + 1).to_le_bytes().to_vec();
         buf.push(0);
         assert!(read_down(&mut Cursor::new(buf)).is_err());
+    }
+
+    #[test]
+    fn eof_inside_length_header_is_an_error() {
+        let mut buf = Vec::new();
+        write_down(&mut buf, &DownFrame::Icon(vec![1, 2, 3])).unwrap();
+        // Append 2 stray bytes (simulating helper crash mid-write of next frame header).
+        buf.push(0xAB);
+        buf.push(0xCD);
+
+        let mut r = Cursor::new(buf);
+        // First read succeeds (valid frame).
+        assert!(matches!(
+            read_down(&mut r).unwrap().unwrap(),
+            DownFrame::Icon(_)
+        ));
+        // Second read hits EOF in the middle of the 4-byte length header.
+        assert!(
+            read_down(&mut r).is_err(),
+            "partial length header should be error"
+        );
     }
 }
