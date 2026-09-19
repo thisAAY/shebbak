@@ -27,6 +27,7 @@ jobs:
             mkdir "$stage"
             cp "target/${target}/release/srw-host" \
                "target/${target}/release/srw-client" \
+               "target/${target}/release/srw-mirror-helper" \
                LICENSE README.md "$stage/"
             tar -czf "${stage}.tar.gz" "$stage"
           done
