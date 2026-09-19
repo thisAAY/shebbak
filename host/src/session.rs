@@ -5,7 +5,7 @@ use srw_capture::macos::stream::SckCapture;
 use srw_capture::WindowCapture;
 use srw_core::mapping::{mapping_for_frame, FrameMeta, InputMapping};
 use srw_core::model::{window_local_to_screen, SnapshotWindow};
-use srw_core::protocol::{ClientMessage, HostMessage, WindowId, WindowKind};
+use srw_core::protocol::{ClientMessage, HostMessage, WindowId};
 use srw_core::tracker::{AppTracker, TrackerEvent, WindowSnapshotSource};
 use srw_input::macos::AxInput;
 use srw_input::macos_pid::PidInput;
@@ -534,54 +534,36 @@ async fn run_session_body(
         let mut tracks_changed = false;
         for ev in events {
             match ev {
-                TrackerEvent::Opened {
-                    window,
-                    kind,
-                    parent_id,
-                    offset_x,
-                    offset_y,
-                } => {
-                    let track_id = match kind {
-                        WindowKind::Normal | WindowKind::Sheet => {
-                            let tid = format!("win-{}", window.info.id);
-                            match open_track_window(
-                                peer,
-                                &rt,
-                                scale,
-                                &window,
-                                &tid,
-                                runtimes,
-                                pli_pipelines,
-                                meta_tx,
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    tracks_changed = true;
-                                    Some(tid)
-                                }
-                                Err(e) => {
-                                    // Loud failure (backlog: no silent black windows). The
-                                    // tracker keeps the window live, so this does NOT retry
-                                    // each poll; the window is simply never announced this
-                                    // session.
-                                    error!(
-                                        "window {} pipeline failed, not mirroring it: {e:#}",
-                                        window.info.id
-                                    );
-                                    continue;
-                                }
-                            }
+                TrackerEvent::Opened { window } => {
+                    let track_id = format!("win-{}", window.info.id);
+                    match open_track_window(
+                        peer,
+                        &rt,
+                        scale,
+                        &window,
+                        &track_id,
+                        runtimes,
+                        pli_pipelines,
+                        meta_tx,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracks_changed = true,
+                        Err(e) => {
+                            // Loud failure (backlog: no silent black windows). The
+                            // tracker keeps the window live, so this does NOT retry
+                            // each poll; the window is simply never announced this
+                            // session.
+                            error!(
+                                "window {} pipeline failed, not mirroring it: {e:#}",
+                                window.info.id
+                            );
+                            continue;
                         }
-                        WindowKind::Transient => None,
-                    };
+                    }
                     let msg = HostMessage::WindowOpened {
                         window_id: window.info.id,
                         title: window.info.title.clone(),
-                        kind,
-                        parent_id,
-                        offset_x,
-                        offset_y,
                         width: window.info.width,
                         height: window.info.height,
                         track_id,

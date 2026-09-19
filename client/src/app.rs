@@ -3,9 +3,7 @@ use softbuffer::{Context, Surface};
 use srw_core::mapping::InputMapping;
 use srw_core::model::{OpenedWindow, TrackBinder, WindowInfo};
 use srw_core::pixels::BgraFrame;
-use srw_core::protocol::{
-    ClientMessage, HostMessage, MouseAction, MouseButton, WindowId, WindowKind,
-};
+use srw_core::protocol::{ClientMessage, HostMessage, MouseAction, MouseButton, WindowId};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -13,11 +11,11 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId as WinitWindowId, WindowLevel};
+use winit::window::{Window, WindowId as WinitWindowId};
 
 /// winit modifiers → CGEventFlags bits (macOS mask constants).
 pub(crate) fn cg_flags(mods: ModifiersState) -> u64 {
@@ -48,7 +46,6 @@ pub struct Mirror {
     surface: Surface<Rc<Window>, Rc<Window>>,
     content: MirrorContent,
     remote_id: WindowId,
-    kind: WindowKind,
     /// Title without the " (minimized)" suffix; re-applied on restore/rename.
     base_title: String,
     minimized: bool,
@@ -109,10 +106,6 @@ impl App {
                 UiEvent::Host(HostMessage::WindowOpened {
                     window_id,
                     title,
-                    kind,
-                    parent_id,
-                    offset_x,
-                    offset_y,
                     width,
                     height,
                     track_id,
@@ -126,20 +119,10 @@ impl App {
                             width,
                             height,
                         },
-                        kind,
-                        parent_id,
-                        offset: (offset_x, offset_y),
-                        track_id: track_id.clone().unwrap_or_default(),
+                        track_id,
                     };
-                    match track_id {
-                        // Track-backed (Normal/Sheet): wait for announcement+track pair.
-                        Some(_) => {
-                            if let Some((ann, ())) = self.binder.on_announcement(ann) {
-                                self.create_mirror(event_loop, ann);
-                            }
-                        }
-                        // Transient: no track to wait for.
-                        None => self.create_mirror(event_loop, ann),
+                    if let Some((ann, ())) = self.binder.on_announcement(ann) {
+                        self.create_mirror(event_loop, ann);
                     }
                 }
                 UiEvent::TrackOpened { track_id } => {
@@ -248,41 +231,14 @@ impl App {
             );
             return;
         }
-        let attrs = match ann.kind {
-            WindowKind::Normal => Window::default_attributes()
-                .with_title(ann.info.title.clone())
-                .with_inner_size(LogicalSize::new(ann.info.width, ann.info.height))
-                .with_resizable(true) // bidirectional size sync
-                // Host-initiated windows must never steal local focus from
-                // unrelated local apps (spec §4); the user focuses the
-                // mirror by clicking it.
-                .with_active(false),
-            WindowKind::Sheet | WindowKind::Transient => {
-                let mut attrs = Window::default_attributes()
-                    .with_title(ann.info.title.clone())
-                    .with_inner_size(LogicalSize::new(ann.info.width, ann.info.height))
-                    .with_resizable(false)
-                    .with_decorations(false)
-                    .with_window_level(WindowLevel::AlwaysOnTop)
-                    .with_active(false); // never steal local focus
-                                         // Parent-relative placement: parent mirror origin + host-point
-                                         // offset, scaled by the PARENT mirror's own scale factor.
-                if let Some(parent) = ann
-                    .parent_id
-                    .and_then(|pid| self.by_remote.get(&pid))
-                    .and_then(|wid| self.mirrors.get(wid))
-                {
-                    if let Ok(pos) = parent.window.inner_position() {
-                        let scale = parent.window.scale_factor();
-                        attrs = attrs.with_position(LogicalPosition::new(
-                            pos.x as f64 / scale + ann.offset.0,
-                            pos.y as f64 / scale + ann.offset.1,
-                        ));
-                    } // parent unknown/position unavailable → let the WM place it
-                }
-                attrs
-            }
-        };
+        let attrs = Window::default_attributes()
+            .with_title(ann.info.title.clone())
+            .with_inner_size(LogicalSize::new(ann.info.width, ann.info.height))
+            .with_resizable(true) // bidirectional size sync
+            // Host-initiated windows must never steal local focus from
+            // unrelated local apps (spec §4); the user focuses the
+            // mirror by clicking it.
+            .with_active(false);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -293,9 +249,7 @@ impl App {
         let context = Context::new(window.clone()).expect("softbuffer context");
         let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
         let wid = window.id();
-        // Track-backed windows may seed from a frame that arrived just before
-        // this mirror was created. Transients have no track and no analogous
-        // early-blit buffer — see the Blit arm in `drain` for why.
+        // A mirror may seed from a frame that arrived just before it was created.
         let content = self
             .early_frames
             .remove(&ann.track_id)
@@ -306,7 +260,6 @@ impl App {
             surface,
             content,
             remote_id: ann.info.id,
-            kind: ann.kind,
             base_title: ann.info.title.clone(),
             minimized: false,
             last_host_size: (ann.info.width, ann.info.height),
@@ -317,15 +270,8 @@ impl App {
         mirror.window.request_redraw();
         self.mirrors.insert(wid, mirror);
         self.by_remote.insert(ann.info.id, wid);
-        // Transient windows have no track (track_id == ""); don't let a
-        // string collide multiple transients into the same `by_track` slot.
-        if !ann.track_id.is_empty() {
-            self.by_track.insert(ann.track_id, wid);
-        }
-        info!(
-            "mirror created for remote window {} (kind {:?})",
-            ann.info.id, ann.kind
-        );
+        self.by_track.insert(ann.track_id, wid);
+        info!("mirror created for remote window {}", ann.info.id);
     }
 
     fn destroy_mirror_by_remote(&mut self, remote: WindowId) {
@@ -463,14 +409,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(true) => {
                 if let Some(m) = self.mirrors.get(&wid) {
-                    if m.kind == WindowKind::Normal || m.kind == WindowKind::Sheet {
-                        send_client_msg(
-                            &self.net,
-                            ClientMessage::FocusChange {
-                                window_id: m.remote_id,
-                            },
-                        );
-                    }
+                    send_client_msg(
+                        &self.net,
+                        ClientMessage::FocusChange {
+                            window_id: m.remote_id,
+                        },
+                    );
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -499,30 +443,28 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 if let Some(m) = self.mirrors.get_mut(&wid) {
-                    if m.kind == WindowKind::Normal {
-                        let scale = m.window.scale_factor();
-                        let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
-                        // Echo guard: host-initiated resizes come back through
-                        // `last_host_size`, so only a genuine client-side
-                        // drag-resize should round-trip back to the host. Once
-                        // we send, fold the just-sent size into the same guard
-                        // — otherwise every intermediate frame of a live drag
-                        // re-clears it and floods the host with a
-                        // ResizeRequest per frame (and the host's own echo of
-                        // this resize would otherwise pass the guard too).
-                        if (w - m.last_host_size.0).abs() >= 1.0
-                            || (h - m.last_host_size.1).abs() >= 1.0
-                        {
-                            m.last_host_size = (w, h);
-                            send_client_msg(
-                                &self.net,
-                                ClientMessage::ResizeRequest {
-                                    window_id: m.remote_id,
-                                    width: w,
-                                    height: h,
-                                },
-                            );
-                        }
+                    let scale = m.window.scale_factor();
+                    let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
+                    // Echo guard: host-initiated resizes come back through
+                    // `last_host_size`, so only a genuine client-side
+                    // drag-resize should round-trip back to the host. Once
+                    // we send, fold the just-sent size into the same guard
+                    // — otherwise every intermediate frame of a live drag
+                    // re-clears it and floods the host with a
+                    // ResizeRequest per frame (and the host's own echo of
+                    // this resize would otherwise pass the guard too).
+                    if (w - m.last_host_size.0).abs() >= 1.0
+                        || (h - m.last_host_size.1).abs() >= 1.0
+                    {
+                        m.last_host_size = (w, h);
+                        send_client_msg(
+                            &self.net,
+                            ClientMessage::ResizeRequest {
+                                window_id: m.remote_id,
+                                width: w,
+                                height: h,
+                            },
+                        );
                     }
                 }
             }

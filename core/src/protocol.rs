@@ -3,15 +3,6 @@ use serde::{Deserialize, Serialize};
 /// Host-side window identifier (CGWindowID on macOS).
 pub type WindowId = u32;
 
-/// Window kind/type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowKind {
-    Normal,
-    Sheet,
-    Transient,
-}
-
 /// Host → client messages on the control data channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -19,13 +10,9 @@ pub enum HostMessage {
     WindowOpened {
         window_id: WindowId,
         title: String,
-        kind: WindowKind,
-        parent_id: Option<WindowId>,
-        offset_x: f64,
-        offset_y: f64,
         width: f64,
         height: f64,
-        track_id: Option<String>,
+        track_id: String,
     },
     WindowResized {
         window_id: WindowId,
@@ -132,24 +119,9 @@ mod tests {
             HostMessage::WindowOpened {
                 window_id: 42,
                 title: "Safari".into(),
-                kind: WindowKind::Normal,
-                parent_id: None,
-                offset_x: 0.0,
-                offset_y: 0.0,
                 width: 800.0,
                 height: 600.0,
-                track_id: Some("win-42".into()),
-            },
-            HostMessage::WindowOpened {
-                window_id: 43,
-                title: "".into(),
-                kind: WindowKind::Transient,
-                parent_id: Some(42),
-                offset_x: 15.0,
-                offset_y: 30.0,
-                width: 200.0,
-                height: 340.0,
-                track_id: None,
+                track_id: "win-42".into(),
             },
             HostMessage::WindowResized {
                 window_id: 42,

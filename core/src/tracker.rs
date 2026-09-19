@@ -1,6 +1,6 @@
 use crate::classify::classify;
-use crate::model::{SnapshotWindow, WindowInfo};
-use crate::protocol::{WindowId, WindowKind};
+use crate::model::{SnapshotWindow, WindowInfo, WindowKind};
+use crate::protocol::WindowId;
 use std::collections::{HashMap, HashSet};
 
 pub trait WindowSnapshotSource {
@@ -12,10 +12,6 @@ pub trait WindowSnapshotSource {
 pub enum TrackerEvent {
     Opened {
         window: SnapshotWindow,
-        kind: WindowKind,
-        parent_id: Option<WindowId>,
-        offset_x: f64,
-        offset_y: f64,
     },
     Closed {
         window_id: WindowId,
@@ -40,7 +36,6 @@ pub enum TrackerEvent {
 struct Tracked {
     info: WindowInfo,
     pid: i32,
-    kind: WindowKind,
     minimized: bool,
     last_unminimized_size: (f64, f64),
 }
@@ -92,24 +87,12 @@ impl AppTracker {
             if self.live.contains_key(&w.info.id) {
                 continue;
             }
-            // Post-filter, every window here is Normal. The kind/parent/
-            // offset fields are vestigial and removed by the plumbing-
-            // removal task of the 2026-09-19 plan.
-            let kind = WindowKind::Normal;
-            let (parent_id, ox, oy) = (None, 0.0, 0.0);
-            events.push(TrackerEvent::Opened {
-                window: w.clone(),
-                kind,
-                parent_id,
-                offset_x: ox,
-                offset_y: oy,
-            });
+            events.push(TrackerEvent::Opened { window: w.clone() });
             self.live.insert(
                 w.info.id,
                 Tracked {
                     info: w.info.clone(),
                     pid: w.pid,
-                    kind,
                     minimized: false,
                     last_unminimized_size: (w.info.width, w.info.height),
                 },
@@ -140,9 +123,7 @@ impl AppTracker {
                     });
                     just_restored = true;
                     // Emit catch-up Resized if size changed while minimized
-                    if (w.info.width, w.info.height) != t.last_unminimized_size
-                        && t.kind != WindowKind::Transient
-                    {
+                    if (w.info.width, w.info.height) != t.last_unminimized_size {
                         events.push(TrackerEvent::Resized {
                             window_id: w.info.id,
                             width: w.info.width,
@@ -151,10 +132,9 @@ impl AppTracker {
                     }
                 }
             }
-            // Resized: only while not minimized, not for Transient, and not immediately after restore
+            // Resized: only while not minimized and not immediately after restore
             // (restore already handled catch-up Resized)
-            if t.kind != WindowKind::Transient
-                && !t.minimized
+            if !t.minimized
                 && !w.minimized
                 && !just_restored
                 && (w.info.width, w.info.height) != (t.info.width, t.info.height)
@@ -188,9 +168,6 @@ impl AppTracker {
     pub fn pid_of(&self, id: WindowId) -> Option<i32> {
         self.live.get(&id).map(|t| t.pid)
     }
-    pub fn kind_of(&self, id: WindowId) -> Option<WindowKind> {
-        self.live.get(&id).map(|t| t.kind)
-    }
     pub fn pid_map(&self) -> HashMap<WindowId, i32> {
         self.live.iter().map(|(id, t)| (*id, t.pid)).collect()
     }
@@ -200,7 +177,6 @@ impl AppTracker {
 mod tests {
     use super::*;
     use crate::model::{AxRole, SnapshotWindow, WindowInfo};
-    use crate::protocol::WindowKind;
 
     #[allow(clippy::too_many_arguments)]
     fn snap(
@@ -247,17 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn new_window_of_shared_pid_opens_with_kind() {
+    fn new_window_of_shared_pid_opens() {
         let mut t = AppTracker::new(&[100]);
         let ev = t.diff(vec![normal(1, 100)]);
         assert_eq!(ev.len(), 1);
         match &ev[0] {
-            TrackerEvent::Opened {
-                window,
-                kind: WindowKind::Normal,
-                parent_id: None,
-                ..
-            } => assert_eq!(window.info.id, 1),
+            TrackerEvent::Opened { window } => assert_eq!(window.info.id, 1),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -346,12 +317,11 @@ mod tests {
     }
 
     #[test]
-    fn geometry_and_kind_reflect_state() {
+    fn geometry_reflects_state() {
         let mut t = AppTracker::new(&[100]);
         t.diff(vec![normal(1, 100)]);
-        assert_eq!(t.kind_of(1), Some(WindowKind::Normal));
         assert_eq!(t.geometry(1).unwrap().width, 800.0);
-        assert_eq!(t.kind_of(99), None);
+        assert!(t.geometry(99).is_none());
     }
 
     #[test]
@@ -448,8 +418,8 @@ mod tests {
         // Appearing emits nothing and they are never tracked.
         let ev = t.diff(vec![menu.clone(), sheet.clone(), normal(1, 100)]);
         assert!(ev.is_empty(), "no events for transient/sheet, got {ev:?}");
-        assert_eq!(t.kind_of(2), None);
-        assert_eq!(t.kind_of(3), None);
+        assert!(t.geometry(2).is_none());
+        assert!(t.geometry(3).is_none());
         assert!(!t.pid_map().contains_key(&2));
         // Disappearing emits nothing either (they were never live).
         let ev = t.diff(vec![normal(1, 100)]);
@@ -465,9 +435,8 @@ mod tests {
         min.on_screen = false;
         let ev = t.diff(vec![min]);
         assert_eq!(ev, vec![TrackerEvent::Minimized { window_id: 1 }]);
-        assert_eq!(
-            t.kind_of(1),
-            Some(WindowKind::Normal),
+        assert!(
+            t.geometry(1).is_some(),
             "minimized normal window must stay tracked"
         );
     }

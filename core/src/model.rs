@@ -1,4 +1,4 @@
-use crate::protocol::{WindowId, WindowKind};
+use crate::protocol::WindowId;
 use std::collections::HashMap;
 
 /// A shared window's identity and geometry in host screen points (top-left origin).
@@ -10,6 +10,16 @@ pub struct WindowInfo {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// Window kind classification (host-side only — never on the wire: only
+/// Normal windows are announced; Sheet/Transient composite into their
+/// parent's stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    Normal,
+    Sheet,
+    Transient,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,15 +46,11 @@ pub fn window_local_to_screen(win: &WindowInfo, local_x: f64, local_y: f64) -> (
 
 /// A `WindowOpened` announcement paired with its track binding key.
 ///
-/// `info.x`/`info.y` are unused (0.0) here — the client's window manager owns
-/// mirror placement; `offset` (host points, relative to `parent_id`'s mirror)
-/// is what a Sheet/Transient mirror is actually positioned from.
+/// `info.x`/`info.y` are unused (0.0) here — the client's window manager
+/// owns mirror placement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenedWindow {
     pub info: WindowInfo,
-    pub kind: WindowKind,
-    pub parent_id: Option<WindowId>,
-    pub offset: (f64, f64),
     pub track_id: String,
 }
 
@@ -117,9 +123,6 @@ mod tests {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
         let ann = OpenedWindow {
             info: win(1),
-            kind: WindowKind::Normal,
-            parent_id: None,
-            offset: (0.0, 0.0),
             track_id: "win-1".into(),
         };
         assert!(b.on_announcement(ann.clone()).is_none());
@@ -134,9 +137,6 @@ mod tests {
         assert!(b.on_track("win-1".into(), "track").is_none());
         let ann = OpenedWindow {
             info: win(1),
-            kind: WindowKind::Normal,
-            parent_id: None,
-            offset: (0.0, 0.0),
             track_id: "win-1".into(),
         };
         let out = b.on_announcement(ann.clone()).unwrap();
@@ -150,9 +150,6 @@ mod tests {
         assert!(b.on_track("win-1".into(), "track").is_none());
         let ann = OpenedWindow {
             info: win(2),
-            kind: WindowKind::Normal,
-            parent_id: None,
-            offset: (0.0, 0.0),
             track_id: "win-2".into(),
         };
         assert!(b.on_announcement(ann).is_none());
@@ -163,9 +160,6 @@ mod tests {
         let mut b: TrackBinder<&'static str> = TrackBinder::new();
         let ann = OpenedWindow {
             info: win(1),
-            kind: WindowKind::Normal,
-            parent_id: None,
-            offset: (0.0, 0.0),
             track_id: "win-1".into(),
         };
         b.on_announcement(ann.clone());
