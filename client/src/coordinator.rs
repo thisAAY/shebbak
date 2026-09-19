@@ -645,6 +645,71 @@ fn reap_by_pid(pid: u32) {
     }
 }
 
+/// Shebbak's own Dock icon, embedded at build time.
+const SHEBBAK_ICON_SVG: &[u8] = include_bytes!("../../assets/shebbak-icon.svg");
+
+/// The coordinator's winit shell: no windows — it exists so Shebbak is a
+/// regular Dock app and so helper/net events drain on the main thread.
+pub struct CoordinatorApp {
+    rx: std::sync::mpsc::Receiver<CoordEvent>,
+    manager: HelperManager,
+    disconnected: bool,
+    icon_set: bool,
+}
+
+impl CoordinatorApp {
+    pub fn new(rx: std::sync::mpsc::Receiver<CoordEvent>, manager: HelperManager) -> Self {
+        Self {
+            rx,
+            manager,
+            disconnected: false,
+            icon_set: false,
+        }
+    }
+
+    pub fn disconnected(&self) -> bool {
+        self.disconnected
+    }
+}
+
+impl winit::application::ApplicationHandler for CoordinatorApp {
+    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        if !self.icon_set {
+            self.icon_set = true;
+            crate::dock::set_dock_icon(SHEBBAK_ICON_SVG);
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, _ev: ()) {
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                CoordEvent::Net(crate::net::UiEvent::Host(msg)) => {
+                    self.manager.on_host_message(msg);
+                }
+                CoordEvent::Net(crate::net::UiEvent::Disconnected) => {
+                    eprintln!("connection lost; exiting");
+                    self.manager.shutdown_all();
+                    self.disconnected = true;
+                    event_loop.exit();
+                }
+                CoordEvent::HelperUp { app_id, msg } => self.manager.on_helper_up(app_id, msg),
+                CoordEvent::HelperExited { app_id, code } => {
+                    self.manager.on_helper_exited(app_id, code);
+                }
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _wid: winit::window::WindowId,
+        _event: winit::event::WindowEvent,
+    ) {
+        // The coordinator owns no windows.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
