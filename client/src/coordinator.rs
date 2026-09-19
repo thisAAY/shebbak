@@ -676,9 +676,6 @@ fn reap_by_pid(pid: u32) {
     }
 }
 
-/// Shebbak's own Dock icon, embedded at build time.
-const SHEBBAK_ICON_SVG: &[u8] = include_bytes!("../../assets/shebbak-icon.svg");
-
 /// The coordinator's winit shell: no windows — it exists so Shebbak is a
 /// regular Dock app and so helper/net events drain on the main thread.
 pub struct CoordinatorApp {
@@ -707,7 +704,7 @@ impl winit::application::ApplicationHandler for CoordinatorApp {
     fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         if !self.icon_set {
             self.icon_set = true;
-            crate::dock::set_dock_icon(SHEBBAK_ICON_SVG);
+            crate::dock::set_dock_icon(crate::dock::SHEBBAK_ICON_SVG);
         }
     }
 

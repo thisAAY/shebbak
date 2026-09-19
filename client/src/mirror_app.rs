@@ -146,6 +146,10 @@ pub struct HelperApp {
     /// once we've actually had a window (an empty helper freshly spawned
     /// with no windows yet is not "idle", it's still starting up).
     saw_a_window: bool,
+    /// Whether any Dock icon has been applied yet — the Shebbak default in
+    /// `resumed`, or the host's badged icon. Keeps a re-fired `resumed`
+    /// (winit doesn't guarantee exactly one) from stomping the host icon.
+    icon_applied: bool,
 }
 
 impl HelperApp {
@@ -161,6 +165,7 @@ impl HelperApp {
             by_track: HashMap::new(),
             exit_reason: None,
             saw_a_window: false,
+            icon_applied: false,
         }
     }
 
@@ -287,7 +292,15 @@ impl HelperApp {
                     // Never forwarded to helpers.
                 }
                 HelperEvent::Icon(png) => {
-                    crate::dock::set_dock_icon(&png);
+                    self.icon_applied = true;
+                    // Badge the host icon with the Shebbak mark so this tile
+                    // is distinguishable from a locally running copy of the
+                    // same app; fall back to the raw icon if compositing
+                    // fails.
+                    match crate::dock::badge_icon(&png, crate::dock::SHEBBAK_ICON_SVG) {
+                        Some(badged) => crate::dock::set_dock_icon(&badged),
+                        None => crate::dock::set_dock_icon(&png),
+                    }
                 }
                 HelperEvent::Eof => {
                     self.exit_reason = Some(ExitReason::Eof);
@@ -429,7 +442,15 @@ impl HelperApp {
 }
 
 impl ApplicationHandler for HelperApp {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        if !self.icon_applied {
+            self.icon_applied = true;
+            // Default to the Shebbak icon until the host's arrives — the
+            // first-launch flash shows our mark instead of the generic
+            // executable icon, and apps with no host icon keep it.
+            crate::dock::set_dock_icon(crate::dock::SHEBBAK_ICON_SVG);
+        }
+    }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _ev: ()) {
         self.drain(event_loop);
