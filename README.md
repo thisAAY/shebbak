@@ -36,7 +36,7 @@ Sharing each window is easier. Shebbak mirrors individual app windows from anoth
 
 - **Share whole apps by picking them.** Every window of the shared app mirrors automatically, including ones it opens later.
 - **Windows behave like windows.** Each mirror is a native window your window manager owns. Move them, resize them (the real window resizes too), close them (the app gets a real close, unsaved-changes sheets included).
-- **Menus, sheets, and popups work.** Context menus and dropdowns appear next to their window within ~150 ms and track your hover.
+- **Menus, sheets, and popups work.** ScreenCaptureKit composites child windows straight into the window's stream (macOS 14.2+), so menus and sheets appear in place, once, at full video quality.
 - **Full input.** Keyboard (with modifiers), mouse, and focus routing. Typing lands in the right app even with several apps shared.
 - **Minimize/restore, live resize, title sync** all mirror across.
 - **Survives packet loss.** Video recovers in about a second via PLI-triggered keyframes.
@@ -44,7 +44,7 @@ Sharing each window is easier. Shebbak mirrors individual app windows from anoth
 ## How it works
 
 - One WebRTC peer connection per session. Regular windows stream as individual **H.264 video tracks**, added and removed at runtime via SDP renegotiation over the control data channel.
-- Transient windows (menus, tooltips, popups) skip the video pipeline entirely: **change-detected PNG snapshots** chunked over the data channel at ~10 Hz. Sharp, alpha-composited, and fast to first paint.
+- Transient windows (menus, tooltips, popups, sheets) ride the parent window's video stream via native child-window compositing — one rendering path, no separate overlay lifecycle to keep in sync. When an oversized sheet overflows the window, the stream letterboxes and a change-triggered `InputMapping` message keeps clicks accurate.
 - The host watches shared apps with a CGWindowList reconciler poked by per-app Accessibility observers, so window lifecycle changes propagate in ~100 ms instead of on a poll.
 - Input goes back over the same data channel and is replayed on the host via Accessibility/CGEvent.
 
@@ -72,11 +72,11 @@ Useful env vars:
 
 | Crate | Role |
 |---|---|
-| `core` | Protocol, window tracking/classification, blit chunking |
+| `core` | Protocol, window tracking/classification, frame metadata |
 | `transport` | WebRTC peer, H.264 codec, signalling |
 | `capture` | ScreenCaptureKit + CGWindowList + Accessibility glue |
 | `input` | Input replay (CGEvent/AX) |
-| `host` | Host binary: session orchestration, encode pipelines, blit loops |
+| `host` | Host binary: session orchestration, encode pipelines, native child-window streaming |
 | `client` | Viewer binary: native mirror windows, decode, input capture |
 
 ## Roadmap
