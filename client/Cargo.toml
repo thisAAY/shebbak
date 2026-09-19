@@ -2,6 +2,9 @@
 name = "srw-client"
 version.workspace = true
 edition.workspace = true
+# Two binaries live here (srw-client + srw-mirror-helper); `cargo run`
+# means the coordinator.
+default-run = "srw-client"
 
 [dependencies]
 srw-core = { path = "../core" }
